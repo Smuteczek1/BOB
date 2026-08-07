@@ -37,19 +37,23 @@ client.commands = new Collection();
 
 // --- Ładowanie komend ---
 const commandsPath = path.join(__dirname, 'commands');
-for (const file of fs.readdirSync(commandsPath).filter(f => f.endsWith('.js'))) {
-  const command = require(path.join(commandsPath, file));
-  client.commands.set(command.data.name, command);
+if (fs.existsSync(commandsPath)) {
+  for (const file of fs.readdirSync(commandsPath).filter(f => f.endsWith('.js'))) {
+    const command = require(path.join(commandsPath, file));
+    client.commands.set(command.data.name, command);
+  }
 }
 
 // --- Ładowanie eventów ---
 const eventsPath = path.join(__dirname, 'events');
-for (const file of fs.readdirSync(eventsPath).filter(f => f.endsWith('.js'))) {
-  const event = require(path.join(eventsPath, file));
-  if (event.once) {
-    client.once(event.name, (...args) => event.execute(...args));
-  } else {
-    client.on(event.name, (...args) => event.execute(...args));
+if (fs.existsSync(eventsPath)) {
+  for (const file of fs.readdirSync(eventsPath).filter(f => f.endsWith('.js'))) {
+    const event = require(path.join(eventsPath, file));
+    if (event.once) {
+      client.once(event.name, (...args) => event.execute(...args));
+    } else {
+      client.on(event.name, (...args) => event.execute(...args));
+    }
   }
 }
 
@@ -115,17 +119,20 @@ async function reconcileTempChannels() {
     try {
       const guild = await client.guilds.fetch(temp.guild_id).catch(() => null);
       if (!guild) {
-        db.removeTempChannel(temp.channel_id);
+        await db.removeTempChannel(temp.channel_id);
         continue;
       }
-      const channel = await guild.channels.fetch(temp.channel_id).catch(() => null);
+      
+      // Użycie fetch ze skróconym opóźnieniem zapewni sprawdzenie rzeczywistej liczby członków
+      const channel = await guild.channels.fetch(temp.channel_id, { force: true }).catch(() => null);
       if (!channel) {
-        db.removeTempChannel(temp.channel_id);
+        await db.removeTempChannel(temp.channel_id);
         continue;
       }
+
       if (channel.members.size === 0) {
         await channel.delete('Sprzątanie po restarcie bota - kanał był pusty').catch(() => null);
-        db.removeTempChannel(temp.channel_id);
+        await db.removeTempChannel(temp.channel_id);
       }
     } catch (err) {
       console.error('Błąd podczas porządkowania kanałów tymczasowych:', err);
