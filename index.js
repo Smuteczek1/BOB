@@ -1,3 +1,4 @@
+process.loadEnvFile();
 const fs = require('node:fs');
 const path = require('node:path');
 const { Client, Collection, GatewayIntentBits, Partials } = require('discord.js');
