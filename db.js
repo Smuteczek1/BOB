@@ -1,211 +1,184 @@
-const path = require('node:path');
-const { DatabaseSync } = require('node:sqlite'); // wbudowane w Node.js - nic nie trzeba kompilować
+const { Pool } = require('pg');
 
-const db = new DatabaseSync(path.join(__dirname, 'data.sqlite'));
-// UWAGA: celowo NIE ustawiamy trybu WAL - dla jednoprocesowego bota to niepotrzebny narzut,
-// a przy częstych zapisach plik "-wal" potrafi rosnąć bez ograniczeń, jeśli baza nie zdąży go
-// "scalić" (checkpoint). Domyślny tryb DELETE jest prostszy i nie generuje dodatkowego pliku.
+// Utworzenie puli połączeń do bazy PostgreSQL/Supabase
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: {
+    rejectUnauthorized: false, // Wymagane dla bezpiecznego połączenia z Supabase na Renderze
+  },
+});
 
-// Konfiguracja per serwer (guild_id jest kluczem - działamy po ID, nigdy po nazwie kanału)
-db.exec(`
-  CREATE TABLE IF NOT EXISTS guild_config (
-    guild_id TEXT PRIMARY KEY,
-    hub_channel_id TEXT,           -- kanał głosowy "dołącz aby stworzyć nowy"
-    stats_channel_id TEXT,         -- kanał tekstowy z rekordami
-    leaderboard_message_id TEXT,   -- ID wiadomości z rankingiem (edytowanej na bieżąco)
-    created_at INTEGER
-  );
+// Pomocnicze funkcje do wykonywania zapytań SQL z parametryzacją ($1, $2, ...)
+async function query(text, params) {
+  return await pool.query(text, params);
+}
 
-  CREATE TABLE IF NOT EXISTS temp_channels (
-    channel_id TEXT PRIMARY KEY,
-    guild_id TEXT NOT NULL,
-    creator_id TEXT,
-    started_at INTEGER NOT NULL
-  );
+async function queryOne(text, params) {
+  const res = await pool.query(text, params);
+  return res.rows[0] || null;
+}
 
-  CREATE TABLE IF NOT EXISTS sessions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    guild_id TEXT NOT NULL,
-    channel_id TEXT NOT NULL,
-    creator_id TEXT,
-    started_at INTEGER NOT NULL,
-    ended_at INTEGER NOT NULL,
-    duration_seconds INTEGER NOT NULL
-  );
+async function queryMany(text, params) {
+  const res = await pool.query(text, params);
+  return res.rows;
+}
 
-  CREATE INDEX IF NOT EXISTS idx_sessions_guild ON sessions(guild_id);
+// Funkcja inicjalizująca tabele w PostgreSQL
+async function initDb() {
+  try {
+    await query(`
+      CREATE TABLE IF NOT EXISTS guild_config (
+        guild_id TEXT PRIMARY KEY,
+        hub_channel_id TEXT,
+        stats_channel_id TEXT,
+        leaderboard_message_id TEXT,
+        suggestions_channel_id TEXT,
+        suggestions_prompt_message_id TEXT,
+        suggestions_list_channel_id TEXT,
+        suggestions_create_channel_id TEXT,
+        levels_channel_id TEXT,
+        created_at BIGINT
+      );
 
-  CREATE TABLE IF NOT EXISTS role_panels (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    guild_id TEXT NOT NULL,
-    channel_id TEXT NOT NULL,
-    message_id TEXT,
-    mode TEXT NOT NULL,            -- 'emoji' albo 'button'
-    title TEXT,
-    description TEXT,
-    created_at INTEGER
-  );
+      CREATE TABLE IF NOT EXISTS temp_channels (
+        channel_id TEXT PRIMARY KEY,
+        guild_id TEXT NOT NULL,
+        creator_id TEXT,
+        started_at BIGINT NOT NULL
+      );
 
-  CREATE TABLE IF NOT EXISTS role_panel_items (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    panel_id INTEGER NOT NULL,
-    role_id TEXT NOT NULL,
-    emoji_key TEXT,     -- do dopasowania reakcji: ID emoji (custom) albo sam unicode znak
-    emoji_raw TEXT,      -- oryginalny zapis emoji, do wyświetlania/przycisków
-    label TEXT,          -- etykieta (np. nazwa roli) pokazywana w embedzie/na przycisku
-    custom_id TEXT,       -- unikalny custom_id przycisku (tylko tryb 'button')
-    position INTEGER,
-    FOREIGN KEY (panel_id) REFERENCES role_panels(id)
-  );
+      CREATE TABLE IF NOT EXISTS sessions (
+        id SERIAL PRIMARY KEY,
+        guild_id TEXT NOT NULL,
+        channel_id TEXT NOT NULL,
+        creator_id TEXT,
+        started_at BIGINT NOT NULL,
+        ended_at BIGINT NOT NULL,
+        duration_seconds INT NOT NULL
+      );
 
-  CREATE INDEX IF NOT EXISTS idx_role_panel_items_panel ON role_panel_items(panel_id);
+      CREATE INDEX IF NOT EXISTS idx_sessions_guild ON sessions(guild_id);
 
-  CREATE TABLE IF NOT EXISTS user_levels (
-    guild_id TEXT NOT NULL,
-    user_id TEXT NOT NULL,
-    xp INTEGER NOT NULL DEFAULT 0,
-    level INTEGER NOT NULL DEFAULT 0,
-    last_text_xp_at INTEGER,
-    PRIMARY KEY (guild_id, user_id)
-  );
+      CREATE TABLE IF NOT EXISTS role_panels (
+        id SERIAL PRIMARY KEY,
+        guild_id TEXT NOT NULL,
+        channel_id TEXT NOT NULL,
+        message_id TEXT,
+        mode TEXT NOT NULL,
+        title TEXT,
+        description TEXT,
+        created_at BIGINT
+      );
 
-  CREATE TABLE IF NOT EXISTS level_roles (
-    guild_id TEXT NOT NULL,
-    level INTEGER NOT NULL,   -- od jakiego poziomu obowiązuje ta rola (0 = od dołączenia do serwera)
-    role_id TEXT NOT NULL,
-    PRIMARY KEY (guild_id, level)
-  );
+      CREATE TABLE IF NOT EXISTS role_panel_items (
+        id SERIAL PRIMARY KEY,
+        panel_id INT NOT NULL REFERENCES role_panels(id) ON DELETE CASCADE,
+        role_id TEXT NOT NULL,
+        emoji_key TEXT,
+        emoji_raw TEXT,
+        label TEXT,
+        custom_id TEXT,
+        position INT
+      );
 
-  CREATE TABLE IF NOT EXISTS suggestion_boards (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    guild_id TEXT NOT NULL,
-    list_channel_id TEXT NOT NULL,
-    create_channel_id TEXT NOT NULL,
-    prompt_message_id TEXT,
-    prompt_text TEXT,
-    button_label TEXT,
-    upvote_emoji TEXT,    -- emotka "za" (domyślnie ✅) - może być custom Discord: <:nazwa:id>
-    downvote_emoji TEXT,  -- emotka "przeciw" (domyślnie ❌) - może być custom Discord: <:nazwa:id>
-    created_at INTEGER
-  );
+      CREATE INDEX IF NOT EXISTS idx_role_panel_items_panel ON role_panel_items(panel_id);
 
-  CREATE INDEX IF NOT EXISTS idx_suggestion_boards_guild ON suggestion_boards(guild_id);
-  CREATE INDEX IF NOT EXISTS idx_suggestion_boards_create_channel ON suggestion_boards(create_channel_id);
-`);
+      CREATE TABLE IF NOT EXISTS user_levels (
+        guild_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        xp INT NOT NULL DEFAULT 0,
+        level INT NOT NULL DEFAULT 0,
+        last_text_xp_at BIGINT,
+        PRIMARY KEY (guild_id, user_id)
+      );
 
-// Migracja: dogrywamy nowe kolumny do istniejących baz danych (np. z poprzedniej wersji bota),
-// żeby nikt nie musiał kasować swojego data.sqlite.
-function ensureColumn(table, column, definition) {
-  const cols = db.prepare(`PRAGMA table_info(${table})`).all();
-  const exists = cols.some(c => c.name === column);
-  if (!exists) {
-    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+      CREATE TABLE IF NOT EXISTS level_roles (
+        guild_id TEXT NOT NULL,
+        level INT NOT NULL,
+        role_id TEXT NOT NULL,
+        PRIMARY KEY (guild_id, level)
+      );
+
+      CREATE TABLE IF NOT EXISTS suggestion_boards (
+        id SERIAL PRIMARY KEY,
+        guild_id TEXT NOT NULL,
+        list_channel_id TEXT NOT NULL,
+        create_channel_id TEXT NOT NULL,
+        prompt_message_id TEXT,
+        prompt_text TEXT,
+        button_label TEXT,
+        upvote_emoji TEXT,
+        downvote_emoji TEXT,
+        created_at BIGINT
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_suggestion_boards_guild ON suggestion_boards(guild_id);
+      CREATE INDEX IF NOT EXISTS idx_suggestion_boards_create_channel ON suggestion_boards(create_channel_id);
+    `);
+    console.log('✅ Baza danych Supabase (PostgreSQL) została pomyślnie zainicjalizowana.');
+  } catch (err) {
+    console.error('❌ Błąd podczas inicjalizacji bazy PostgreSQL:', err);
   }
 }
-ensureColumn('guild_config', 'suggestions_channel_id', 'TEXT'); // stare pole - zachowane dla kompatybilności wstecznej
-ensureColumn('guild_config', 'suggestions_prompt_message_id', 'TEXT');
-ensureColumn('guild_config', 'suggestions_list_channel_id', 'TEXT');   // kanał, gdzie lądują opublikowane propozycje
-ensureColumn('guild_config', 'suggestions_create_channel_id', 'TEXT'); // kanał z samym przyciskiem "utwórz propozycję"
-ensureColumn('guild_config', 'levels_channel_id', 'TEXT'); // kanał, na którym ogłaszane są kamienie milowe poziomów
-ensureColumn('suggestion_boards', 'upvote_emoji', 'TEXT');   // dla baz stworzonych przed dodaniem custom emotek
-ensureColumn('suggestion_boards', 'downvote_emoji', 'TEXT');
 
-// Jednorazowa migracja danych: kto miał starą, pojedynczą wersję kanału propozycji (sprzed
-// wprowadzenia wielu niezależnych tablic), dostaje ją automatycznie jako pierwszą tablicę
-// propozycji w nowej tabeli suggestion_boards - żeby nic nie zniknęło po aktualizacji.
-db.exec(`
-  UPDATE guild_config
-  SET suggestions_list_channel_id = suggestions_channel_id
-  WHERE suggestions_channel_id IS NOT NULL AND suggestions_list_channel_id IS NULL
-`);
-
-(function migrateLegacySuggestionsConfigToBoards() {
-  const rows = db.prepare(`
-    SELECT guild_id, suggestions_list_channel_id, suggestions_create_channel_id, suggestions_prompt_message_id
-    FROM guild_config
-    WHERE suggestions_list_channel_id IS NOT NULL AND suggestions_create_channel_id IS NOT NULL
-  `).all();
-
-  for (const row of rows) {
-    const alreadyMigrated = db.prepare(`
-      SELECT 1 FROM suggestion_boards WHERE create_channel_id = ?
-    `).get(row.suggestions_create_channel_id);
-
-    if (!alreadyMigrated) {
-      db.prepare(`
-        INSERT INTO suggestion_boards (guild_id, list_channel_id, create_channel_id, prompt_message_id, created_at)
-        VALUES (?, ?, ?, ?, ?)
-      `).run(
-        row.guild_id,
-        row.suggestions_list_channel_id,
-        row.suggestions_create_channel_id,
-        row.suggestions_prompt_message_id,
-        Date.now(),
-      );
-    }
-  }
-})();
-
-// Sprzątanie po usuniętym systemie kolorowych ról - jeśli tabela istnieje z poprzedniej
-// wersji bota, kasujemy ją, żeby nie zajmowała miejsca i nie mylić przy przeglądaniu bazy.
-db.exec('DROP TABLE IF EXISTS color_roles');
+// Uruchamiamy automatyczną kreację struktur tabel
+initDb();
 
 module.exports = {
-  raw: db,
+  raw: pool,
 
   // --- Konfiguracja serwera ---
-  getGuildConfig(guildId) {
-    return db.prepare('SELECT * FROM guild_config WHERE guild_id = ?').get(guildId);
+  async getGuildConfig(guildId) {
+    return await queryOne('SELECT * FROM guild_config WHERE guild_id = $1', [guildId]);
   },
 
-  upsertGuildConfig(guildId, { hubChannelId, statsChannelId }) {
-    const existing = this.getGuildConfig(guildId);
+  async upsertGuildConfig(guildId, { hubChannelId, statsChannelId }) {
+    const existing = await this.getGuildConfig(guildId);
     if (existing) {
-      db.prepare(`
+      await query(`
         UPDATE guild_config
-        SET hub_channel_id = COALESCE(?, hub_channel_id),
-            stats_channel_id = COALESCE(?, stats_channel_id)
-        WHERE guild_id = ?
-      `).run(hubChannelId ?? null, statsChannelId ?? null, guildId);
+        SET hub_channel_id = COALESCE($1, hub_channel_id),
+            stats_channel_id = COALESCE($2, stats_channel_id)
+        WHERE guild_id = $3
+      `, [hubChannelId ?? null, statsChannelId ?? null, guildId]);
     } else {
-      db.prepare(`
+      await query(`
         INSERT INTO guild_config (guild_id, hub_channel_id, stats_channel_id, created_at)
-        VALUES (?, ?, ?, ?)
-      `).run(guildId, hubChannelId ?? null, statsChannelId ?? null, Date.now());
+        VALUES ($1, $2, $3, $4)
+      `, [guildId, hubChannelId ?? null, statsChannelId ?? null, Date.now()]);
     }
   },
 
-  setLeaderboardMessageId(guildId, messageId) {
-    db.prepare('UPDATE guild_config SET leaderboard_message_id = ? WHERE guild_id = ?')
-      .run(messageId, guildId);
+  async setLeaderboardMessageId(guildId, messageId) {
+    await query('UPDATE guild_config SET leaderboard_message_id = $1 WHERE guild_id = $2', [messageId, guildId]);
   },
 
-  // --- Kanały propozycji (STARE, pojedyncze - zachowane dla kompatybilności wstecznej,
-  //     nowy kod powinien używać funkcji "Tablice propozycji" poniżej) ---
-  setSuggestionsConfig(guildId, { listChannelId, createChannelId, promptMessageId }) {
-    const existing = this.getGuildConfig(guildId);
+  // --- Kanały propozycji (stare) ---
+  async setSuggestionsConfig(guildId, { listChannelId, createChannelId, promptMessageId }) {
+    const existing = await this.getGuildConfig(guildId);
     if (existing) {
-      db.prepare(`
+      await query(`
         UPDATE guild_config
-        SET suggestions_list_channel_id = COALESCE(?, suggestions_list_channel_id),
-            suggestions_create_channel_id = COALESCE(?, suggestions_create_channel_id),
-            suggestions_prompt_message_id = COALESCE(?, suggestions_prompt_message_id)
-        WHERE guild_id = ?
-      `).run(listChannelId ?? null, createChannelId ?? null, promptMessageId ?? null, guildId);
+        SET suggestions_list_channel_id = COALESCE($1, suggestions_list_channel_id),
+            suggestions_create_channel_id = COALESCE($2, suggestions_create_channel_id),
+            suggestions_prompt_message_id = COALESCE($3, suggestions_prompt_message_id)
+        WHERE guild_id = $4
+      `, [listChannelId ?? null, createChannelId ?? null, promptMessageId ?? null, guildId]);
     } else {
-      db.prepare(`
+      await query(`
         INSERT INTO guild_config (guild_id, suggestions_list_channel_id, suggestions_create_channel_id, suggestions_prompt_message_id, created_at)
-        VALUES (?, ?, ?, ?, ?)
-      `).run(guildId, listChannelId ?? null, createChannelId ?? null, promptMessageId ?? null, Date.now());
+        VALUES ($1, $2, $3, $4, $5)
+      `, [guildId, listChannelId ?? null, createChannelId ?? null, promptMessageId ?? null, Date.now()]);
     }
   },
 
-  // --- Tablice propozycji (można mieć wiele niezależnych tablic na serwerze) ---
-  createSuggestionBoard(guildId, { listChannelId, createChannelId, promptText, buttonLabel, upvoteEmoji, downvoteEmoji }) {
-    db.prepare(`
+  // --- Tablice propozycji ---
+  async createSuggestionBoard(guildId, { listChannelId, createChannelId, promptText, buttonLabel, upvoteEmoji, downvoteEmoji }) {
+    const res = await queryOne(`
       INSERT INTO suggestion_boards (guild_id, list_channel_id, create_channel_id, prompt_text, button_label, upvote_emoji, downvote_emoji, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      RETURNING *
+    `, [
       guildId,
       listChannelId,
       createChannelId,
@@ -214,205 +187,204 @@ module.exports = {
       upvoteEmoji ?? null,
       downvoteEmoji ?? null,
       Date.now(),
-    );
-    return db.prepare('SELECT * FROM suggestion_boards WHERE rowid = last_insert_rowid()').get();
+    ]);
+    return res;
   },
 
-  setSuggestionBoardPromptMessageId(boardId, messageId) {
-    db.prepare('UPDATE suggestion_boards SET prompt_message_id = ? WHERE id = ?').run(messageId, boardId);
+  async setSuggestionBoardPromptMessageId(boardId, messageId) {
+    await query('UPDATE suggestion_boards SET prompt_message_id = $1 WHERE id = $2', [messageId, boardId]);
   },
 
-  getSuggestionBoard(boardId) {
-    return db.prepare('SELECT * FROM suggestion_boards WHERE id = ?').get(boardId);
+  async getSuggestionBoard(boardId) {
+    return await queryOne('SELECT * FROM suggestion_boards WHERE id = $1', [boardId]);
   },
 
-  listSuggestionBoards(guildId) {
-    return db.prepare('SELECT * FROM suggestion_boards WHERE guild_id = ? ORDER BY id').all(guildId);
+  async listSuggestionBoards(guildId) {
+    return await queryMany('SELECT * FROM suggestion_boards WHERE guild_id = $1 ORDER BY id', [guildId]);
   },
 
-  deleteSuggestionBoard(boardId) {
-    db.prepare('DELETE FROM suggestion_boards WHERE id = ?').run(boardId);
+  async deleteSuggestionBoard(boardId) {
+    await query('DELETE FROM suggestion_boards WHERE id = $1', [boardId]);
   },
 
   // --- Tymczasowe kanały głosowe ---
-  addTempChannel(channelId, guildId, creatorId) {
-    db.prepare(`
+  async addTempChannel(channelId, guildId, creatorId) {
+    await query(`
       INSERT INTO temp_channels (channel_id, guild_id, creator_id, started_at)
-      VALUES (?, ?, ?, ?)
-    `).run(channelId, guildId, creatorId, Date.now());
+      VALUES ($1, $2, $3, $4)
+      ON CONFLICT (channel_id) DO NOTHING
+    `, [channelId, guildId, creatorId, Date.now()]);
   },
 
-  getTempChannel(channelId) {
-    return db.prepare('SELECT * FROM temp_channels WHERE channel_id = ?').get(channelId);
+  async getTempChannel(channelId) {
+    return await queryOne('SELECT * FROM temp_channels WHERE channel_id = $1', [channelId]);
   },
 
-  removeTempChannel(channelId) {
-    db.prepare('DELETE FROM temp_channels WHERE channel_id = ?').run(channelId);
+  async removeTempChannel(channelId) {
+    await query('DELETE FROM temp_channels WHERE channel_id = $1', [channelId]);
   },
 
-  getAllTempChannels() {
-    return db.prepare('SELECT * FROM temp_channels').all();
+  async getAllTempChannels() {
+    return await queryMany('SELECT * FROM temp_channels');
   },
 
-  // --- Sesje (zakończone rozmowy) ---
-  addSession(guildId, channelId, creatorId, startedAt, endedAt) {
+  // --- Sesje ---
+  async addSession(guildId, channelId, creatorId, startedAt, endedAt) {
     const durationSeconds = Math.max(0, Math.round((endedAt - startedAt) / 1000));
-    db.prepare(`
+    await query(`
       INSERT INTO sessions (guild_id, channel_id, creator_id, started_at, ended_at, duration_seconds)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(guildId, channelId, creatorId, startedAt, endedAt, durationSeconds);
+      VALUES ($1, $2, $3, $4, $5, $6)
+    `, [guildId, channelId, creatorId, startedAt, endedAt, durationSeconds]);
     return durationSeconds;
   },
 
-  getTopAllTime(guildId, limit = 5) {
-    return db.prepare(`
-      SELECT * FROM sessions WHERE guild_id = ?
-      ORDER BY duration_seconds DESC LIMIT ?
-    `).all(guildId, limit);
+  async getTopAllTime(guildId, limit = 5) {
+    return await queryMany(`
+      SELECT * FROM sessions WHERE guild_id = $1
+      ORDER BY duration_seconds DESC LIMIT $2
+    `, [guildId, limit]);
   },
 
-  getTopThisMonth(guildId, limit = 5) {
+  async getTopThisMonth(guildId, limit = 5) {
     const now = new Date();
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
     const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 1).getTime();
-    return db.prepare(`
+    return await queryMany(`
       SELECT * FROM sessions
-      WHERE guild_id = ? AND started_at >= ? AND started_at < ?
-      ORDER BY duration_seconds DESC LIMIT ?
-    `).all(guildId, monthStart, monthEnd, limit);
+      WHERE guild_id = $1 AND started_at >= $2 AND started_at < $3
+      ORDER BY duration_seconds DESC LIMIT $4
+    `, [guildId, monthStart, monthEnd, limit]);
   },
 
-  // --- Panele ról (reakcje lub przyciski) ---
-  createRolePanel(guildId, { channelId, mode, title, description }) {
-    db.prepare(`
+  // --- Panele ról ---
+  async createRolePanel(guildId, { channelId, mode, title, description }) {
+    return await queryOne(`
       INSERT INTO role_panels (guild_id, channel_id, mode, title, description, created_at)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(guildId, channelId, mode, title ?? null, description ?? null, Date.now());
-    return db.prepare('SELECT * FROM role_panels WHERE rowid = last_insert_rowid()').get();
+      VALUES ($1, $2, $3, $4, $5, $6)
+      RETURNING *
+    `, [guildId, channelId, mode, title ?? null, description ?? null, Date.now()]);
   },
 
-  setRolePanelMessageId(panelId, messageId) {
-    db.prepare('UPDATE role_panels SET message_id = ? WHERE id = ?').run(messageId, panelId);
+  async setRolePanelMessageId(panelId, messageId) {
+    await query('UPDATE role_panels SET message_id = $1 WHERE id = $2', [messageId, panelId]);
   },
 
-  getRolePanel(panelId) {
-    return db.prepare('SELECT * FROM role_panels WHERE id = ?').get(panelId);
+  async getRolePanel(panelId) {
+    return await queryOne('SELECT * FROM role_panels WHERE id = $1', [panelId]);
   },
 
-  getRolePanelByMessageId(messageId) {
-    return db.prepare('SELECT * FROM role_panels WHERE message_id = ?').get(messageId);
+  async getRolePanelByMessageId(messageId) {
+    return await queryOne('SELECT * FROM role_panels WHERE message_id = $1', [messageId]);
   },
 
-  listRolePanels(guildId) {
-    return db.prepare('SELECT * FROM role_panels WHERE guild_id = ? ORDER BY id').all(guildId);
+  async listRolePanels(guildId) {
+    return await queryMany('SELECT * FROM role_panels WHERE guild_id = $1 ORDER BY id', [guildId]);
   },
 
-  deleteRolePanel(panelId) {
-    db.prepare('DELETE FROM role_panel_items WHERE panel_id = ?').run(panelId);
-    db.prepare('DELETE FROM role_panels WHERE id = ?').run(panelId);
+  async deleteRolePanel(panelId) {
+    await query('DELETE FROM role_panel_items WHERE panel_id = $1', [panelId]);
+    await query('DELETE FROM role_panels WHERE id = $1', [panelId]);
   },
 
-  addRolePanelItem(panelId, { roleId, emojiKey, emojiRaw, label, customId }) {
-    const countRow = db.prepare('SELECT COUNT(*) as c FROM role_panel_items WHERE panel_id = ?').get(panelId);
-    const position = countRow.c;
-    db.prepare(`
+  async addRolePanelItem(panelId, { roleId, emojiKey, emojiRaw, label, customId }) {
+    const countRow = await queryOne('SELECT COUNT(*)::int as c FROM role_panel_items WHERE panel_id = $1', [panelId]);
+    const position = countRow ? countRow.c : 0;
+    return await queryOne(`
       INSERT INTO role_panel_items (panel_id, role_id, emoji_key, emoji_raw, label, custom_id, position)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(panelId, roleId, emojiKey ?? null, emojiRaw ?? null, label ?? null, customId ?? null, position);
-    return db.prepare('SELECT * FROM role_panel_items WHERE rowid = last_insert_rowid()').get();
+      VALUES ($1, $2, $3, $4, $5, $6, $7)
+      RETURNING *
+    `, [panelId, roleId, emojiKey ?? null, emojiRaw ?? null, label ?? null, customId ?? null, position]);
   },
 
-  removeRolePanelItemByRole(panelId, roleId) {
-    db.prepare('DELETE FROM role_panel_items WHERE panel_id = ? AND role_id = ?').run(panelId, roleId);
+  async removeRolePanelItemByRole(panelId, roleId) {
+    await query('DELETE FROM role_panel_items WHERE panel_id = $1 AND role_id = $2', [panelId, roleId]);
   },
 
-  getRolePanelItems(panelId) {
-    return db.prepare('SELECT * FROM role_panel_items WHERE panel_id = ? ORDER BY position').all(panelId);
+  async getRolePanelItems(panelId) {
+    return await queryMany('SELECT * FROM role_panel_items WHERE panel_id = $1 ORDER BY position', [panelId]);
   },
 
-  getRolePanelItemByEmojiKey(panelId, emojiKey) {
-    return db.prepare('SELECT * FROM role_panel_items WHERE panel_id = ? AND emoji_key = ?').get(panelId, emojiKey);
+  async getRolePanelItemByEmojiKey(panelId, emojiKey) {
+    return await queryOne('SELECT * FROM role_panel_items WHERE panel_id = $1 AND emoji_key = $2', [panelId, emojiKey]);
   },
 
-  getRolePanelItemByCustomId(customId) {
-    return db.prepare('SELECT * FROM role_panel_items WHERE custom_id = ?').get(customId);
+  async getRolePanelItemByCustomId(customId) {
+    return await queryOne('SELECT * FROM role_panel_items WHERE custom_id = $1', [customId]);
   },
 
-  // --- Kanał poziomów (kamienie milowe) ---
-  setLevelsChannel(guildId, channelId) {
-    const existing = this.getGuildConfig(guildId);
+  // --- Kanał poziomów ---
+  async setLevelsChannel(guildId, channelId) {
+    const existing = await this.getGuildConfig(guildId);
     if (existing) {
-      db.prepare('UPDATE guild_config SET levels_channel_id = ? WHERE guild_id = ?').run(channelId, guildId);
+      await query('UPDATE guild_config SET levels_channel_id = $1 WHERE guild_id = $2', [channelId, guildId]);
     } else {
-      db.prepare(`
+      await query(`
         INSERT INTO guild_config (guild_id, levels_channel_id, created_at)
-        VALUES (?, ?, ?)
-      `).run(guildId, channelId, Date.now());
+        VALUES ($1, $2, $3)
+      `, [guildId, channelId, Date.now()]);
     }
   },
 
   // --- System EXP ---
-  getUserLevel(guildId, userId) {
-    return db.prepare('SELECT * FROM user_levels WHERE guild_id = ? AND user_id = ?').get(guildId, userId);
+  async getUserLevel(guildId, userId) {
+    return await queryOne('SELECT * FROM user_levels WHERE guild_id = $1 AND user_id = $2', [guildId, userId]);
   },
 
-  canGetTextXp(guildId, userId, cooldownMs) {
-    const row = this.getUserLevel(guildId, userId);
+  async canGetTextXp(guildId, userId, cooldownMs) {
+    const row = await this.getUserLevel(guildId, userId);
     if (!row || !row.last_text_xp_at) return true;
-    return Date.now() - row.last_text_xp_at >= cooldownMs;
+    return Date.now() - Number(row.last_text_xp_at) >= cooldownMs;
   },
 
-  // Dodaje XP (z dowolnego źródła), aktualizuje "ostatnio dostał XP z czatu" tylko dla source='text'.
-  // Zwraca { oldLevel, newLevel, xp } - do sprawdzenia, czy trzeba ogłosić kamień milowy.
-  addXp(guildId, userId, amount, source, computeLevel) {
-    const existing = this.getUserLevel(guildId, userId);
+  async addXp(guildId, userId, amount, source, computeLevel) {
+    const existing = await this.getUserLevel(guildId, userId);
     const now = Date.now();
 
     if (!existing) {
-      db.prepare(`
+      await query(`
         INSERT INTO user_levels (guild_id, user_id, xp, level, last_text_xp_at)
-        VALUES (?, ?, ?, 0, ?)
-      `).run(guildId, userId, amount, source === 'text' ? now : null);
+        VALUES ($1, $2, $3, 0, $4)
+      `, [guildId, userId, amount, source === 'text' ? now : null]);
     } else if (source === 'text') {
-      db.prepare(`
-        UPDATE user_levels SET xp = xp + ?, last_text_xp_at = ? WHERE guild_id = ? AND user_id = ?
-      `).run(amount, now, guildId, userId);
+      await query(`
+        UPDATE user_levels SET xp = xp + $1, last_text_xp_at = $2 WHERE guild_id = $3 AND user_id = $4
+      `, [amount, now, guildId, userId]);
     } else {
-      db.prepare(`
-        UPDATE user_levels SET xp = xp + ? WHERE guild_id = ? AND user_id = ?
-      `).run(amount, guildId, userId);
+      await query(`
+        UPDATE user_levels SET xp = xp + $1 WHERE guild_id = $2 AND user_id = $3
+      `, [amount, guildId, userId]);
     }
 
-    const row = this.getUserLevel(guildId, userId);
+    const row = await this.getUserLevel(guildId, userId);
     const oldLevel = row.level;
     const newLevel = computeLevel(row.xp);
 
     if (newLevel !== oldLevel) {
-      db.prepare('UPDATE user_levels SET level = ? WHERE guild_id = ? AND user_id = ?').run(newLevel, guildId, userId);
+      await query('UPDATE user_levels SET level = $1 WHERE guild_id = $2 AND user_id = $3', [newLevel, guildId, userId]);
     }
 
     return { oldLevel, newLevel, xp: row.xp };
   },
 
-  getLeaderboardXp(guildId, limit = 10) {
-    return db.prepare(`
-      SELECT * FROM user_levels WHERE guild_id = ? ORDER BY xp DESC LIMIT ?
-    `).all(guildId, limit);
+  async getLeaderboardXp(guildId, limit = 10) {
+    return await queryMany(`
+      SELECT * FROM user_levels WHERE guild_id = $1 ORDER BY xp DESC LIMIT $2
+    `, [guildId, limit]);
   },
 
-  // --- Drabinka ról za poziomy (automatyczne role: dołączenie = poziom 0, potem coraz wyższe) ---
-  setLevelRole(guildId, level, roleId) {
-    db.prepare(`
-      INSERT INTO level_roles (guild_id, level, role_id) VALUES (?, ?, ?)
-      ON CONFLICT(guild_id, level) DO UPDATE SET role_id = excluded.role_id
-    `).run(guildId, level, roleId);
+  // --- Drabinka ról za poziomy ---
+  async setLevelRole(guildId, level, roleId) {
+    await query(`
+      INSERT INTO level_roles (guild_id, level, role_id) VALUES ($1, $2, $3)
+      ON CONFLICT(guild_id, level) DO UPDATE SET role_id = EXCLUDED.role_id
+    `, [guildId, level, roleId]);
   },
 
-  removeLevelRole(guildId, level) {
-    db.prepare('DELETE FROM level_roles WHERE guild_id = ? AND level = ?').run(guildId, level);
+  async removeLevelRole(guildId, level) {
+    await query('DELETE FROM level_roles WHERE guild_id = $1 AND level = $2', [guildId, level]);
   },
 
-  getLevelRoles(guildId) {
-    return db.prepare('SELECT * FROM level_roles WHERE guild_id = ? ORDER BY level DESC').all(guildId);
+  async getLevelRoles(guildId) {
+    return await queryMany('SELECT * FROM level_roles WHERE guild_id = $1 ORDER BY level DESC', [guildId]);
   },
 };
