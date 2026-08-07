@@ -24,9 +24,7 @@ const DEFAULT_BUTTON_LABEL = 'Dodaj propozycję';
 const DEFAULT_UPVOTE_EMOJI = '✅';
 const DEFAULT_DOWNVOTE_EMOJI = '❌';
 
-// Tymczasowe przechowywanie danych z /setup-propozycje między slash-komendą a modalem
-// "własny styl" (Discord nie pozwala przekazać tego inaczej niż przez customId, a tam
-// zmieściłby się tylko krótki token). Wpisy same się czyszczą po 10 minutach.
+// Tymczasowe przechowywanie danych z /setup-propozycje
 const pendingSetups = new Map();
 
 function storePendingSetup(token, data) {
@@ -41,20 +39,17 @@ function takePendingSetup(token) {
   return data;
 }
 
-// Rozpoznaje czy podana emotka to custom Discorda (<:nazwa:id> lub <a:nazwa:id>) czy zwykły
-// unicode znak (np. ✅, 👍). Zwraca postać, jaką trzeba przekazać do message.react().
 function toReactableEmoji(raw) {
   if (!raw) return null;
   const trimmed = raw.trim();
   const customMatch = trimmed.match(/^<a?:(\w+):(\d+)>$/);
   if (customMatch) {
     const [, name, id] = customMatch;
-    return `${name}:${id}`; // format akceptowany przez message.react()
+    return `${name}:${id}`;
   }
-  return trimmed; // zwykły unicode znak - używamy tak jak jest
+  return trimmed;
 }
 
-// Wiadomość z przyciskiem, wysyłana raz przy tworzeniu tablicy propozycji
 function buildPromptMessage(board) {
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
@@ -70,10 +65,10 @@ function buildPromptMessage(board) {
   };
 }
 
-// Formularz (modal) otwierany po kliknięciu przycisku "Dodaj propozycję".
-// customId zawiera ID tablicy (board), do której trafi propozycja.
 function buildModal(boardId) {
-  const modal = new ModalBuilder().setCustomId(`${MODAL_CUSTOM_ID_PREFIX}${boardId}`).setTitle('Nowa propozycja');
+  const modal = new ModalBuilder()
+    .setCustomId(`${MODAL_CUSTOM_ID_PREFIX}${boardId}`)
+    .setTitle('Nowa propozycja');
 
   const titleLabel = new LabelBuilder()
     .setLabel('Tytuł')
@@ -121,8 +116,6 @@ function buildModal(boardId) {
   return modal;
 }
 
-// Modal "własny styl" pokazywany od razu po /setup-propozycje styl:Własny.
-// Token wskazuje na tymczasowo zapisane dane (kategoria/nazwy kanałów/emotki) z komendy.
 function buildStyleModal(token) {
   const modal = new ModalBuilder()
     .setCustomId(`${STYLE_MODAL_CUSTOM_ID_PREFIX}${token}`)
@@ -166,8 +159,6 @@ function isValidHttpUrl(url) {
   }
 }
 
-// Wyciąga URL pierwszego wgranego pliku - obsługuje zarówno tablicę jak i Collection
-// (żeby nie zależeć od dokładnego kształtu zwracanego przez discord.js)
 function extractFirstUploadUrl(fieldsResult) {
   if (!fieldsResult) return null;
   if (Array.isArray(fieldsResult)) {
@@ -179,9 +170,6 @@ function extractFirstUploadUrl(fieldsResult) {
   return null;
 }
 
-// Tworzy dwa kanały (lista + tworzenie), zapisuje nową tablicę propozycji w bazie
-// i wysyła wiadomość z przyciskiem na kanale tworzenia. Używane zarówno przy stylu
-// domyślnym, jak i po wypełnieniu modala "własny styl".
 async function createSuggestionBoard(
   interaction,
   { categoryId, listName, createName, promptText, buttonLabel, upvoteEmoji, downvoteEmoji },
@@ -196,8 +184,6 @@ async function createSuggestionBoard(
     const everyoneRole = guild.roles.everyone;
     const botMember = guild.members.me;
 
-    // Wspólny zestaw uprawnień dla obu kanałów: nikt (żadna ranga) nie pisze i nie dodaje
-    // własnych reakcji, tylko bot publikuje treści.
     const lockedOverwrites = [
       {
         id: everyoneRole.id,
@@ -225,7 +211,7 @@ async function createSuggestionBoard(
 
     const listChannel = await guild.channels.create({
       name: listName,
-      type: 0, // ChannelType.GuildText
+      type: 0,
       parent: categoryId ?? null,
       topic: 'Tutaj lądują zgłoszone propozycje. Głosuj reakcjami.',
       permissionOverwrites: lockedOverwrites,
@@ -241,7 +227,8 @@ async function createSuggestionBoard(
       reason: `Kanał tworzenia propozycji skonfigurowany przez ${interaction.user.tag}`,
     });
 
-    const board = db.createSuggestionBoard(guild.id, {
+    // Wprowadzono await do tworzenia w bazie PostgreSQL
+    const board = await db.createSuggestionBoard(guild.id, {
       listChannelId: listChannel.id,
       createChannelId: createChannel.id,
       promptText,
@@ -252,7 +239,9 @@ async function createSuggestionBoard(
 
     const { content, components } = buildPromptMessage(board);
     const promptMsg = await createChannel.send({ content, components });
-    db.setSuggestionBoardPromptMessageId(board.id, promptMsg.id);
+    
+    // Wprowadzono await
+    await db.setSuggestionBoardPromptMessageId(board.id, promptMsg.id);
 
     await interaction.editReply({
       content:
@@ -275,8 +264,6 @@ async function createSuggestionBoard(
   }
 }
 
-// Obsługa wypełnionego modala "własny styl" - odbiera token, wyciąga zapamiętane dane
-// z /setup-propozycje (kategoria, nazwy kanałów, emotki) i dopiero teraz faktycznie tworzy kanały.
 async function handleStyleModalSubmit(interaction) {
   const token = interaction.customId.slice(STYLE_MODAL_CUSTOM_ID_PREFIX.length);
   const pending = takePendingSetup(token);
@@ -295,12 +282,21 @@ async function handleStyleModalSubmit(interaction) {
   await createSuggestionBoard(interaction, { ...pending, promptText, buttonLabel });
 }
 
-// Obsługa wysłanego formularza propozycji - budowa embeda, publikacja na kanale listy
-// WŁAŚCIWEJ tablicy (odczytanej z customId modala) i dodanie reakcji do głosowania
-// (własnych emotek tablicy, jeśli je ustawiono - w przeciwnym razie ✅ / ❌).
 async function handleModalSubmit(interaction) {
-  const boardId = Number(interaction.customId.slice(MODAL_CUSTOM_ID_PREFIX.length));
-  const board = db.getSuggestionBoard(boardId);
+  // Bezpieczne konwertowanie na cyfrę z zabezpieczeniem NaN
+  const rawId = interaction.customId.slice(MODAL_CUSTOM_ID_PREFIX.length);
+  const boardId = parseInt(rawId, 10);
+
+  if (isNaN(boardId)) {
+    await interaction.reply({
+      content: '⚠️ Błędny identyfikator tablicy propozycji.',
+      ephemeral: true,
+    });
+    return;
+  }
+
+  // Wprowadzono await
+  const board = await db.getSuggestionBoard(boardId);
 
   if (!board) {
     await interaction.reply({
