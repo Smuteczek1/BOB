@@ -13,5 +13,6 @@
   },
   "dependencies": {
     "discord.js": "^14.25.1"
+    "pg": "^8.11.0"
   }
 }
