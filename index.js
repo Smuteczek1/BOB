@@ -1,4 +1,10 @@
-process.loadEnvFile();
+// Bezpieczne wczytywanie .env (nie wywala błędu na Renderze, gdzie pliku .env nie ma na GitHubie)
+try {
+  process.loadEnvFile();
+} catch (err) {
+  // Ignoruj brak pliku .env w środowisku produkcyjnym (Render pobierze zmienne z panelu)
+}
+
 const fs = require('node:fs');
 const path = require('node:path');
 const { Client, Collection, GatewayIntentBits, Partials } = require('discord.js');
