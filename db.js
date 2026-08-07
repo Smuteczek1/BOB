@@ -172,7 +172,7 @@ module.exports = {
     }
   },
 
-  // --- Tablice propozycji ---
+// --- Tablice propozycji ---
   async createSuggestionBoard(guildId, { listChannelId, createChannelId, promptText, buttonLabel, upvoteEmoji, downvoteEmoji }) {
     const res = await queryOne(`
       INSERT INTO suggestion_boards (guild_id, list_channel_id, create_channel_id, prompt_text, button_label, upvote_emoji, downvote_emoji, created_at)
@@ -192,11 +192,15 @@ module.exports = {
   },
 
   async setSuggestionBoardPromptMessageId(boardId, messageId) {
-    await query('UPDATE suggestion_boards SET prompt_message_id = $1 WHERE id = $2', [messageId, boardId]);
+    const parsedId = parseInt(boardId, 10);
+    if (isNaN(parsedId)) return;
+    await query('UPDATE suggestion_boards SET prompt_message_id = $1 WHERE id = $2', [messageId, parsedId]);
   },
 
   async getSuggestionBoard(boardId) {
-    return await queryOne('SELECT * FROM suggestion_boards WHERE id = $1', [boardId]);
+    const parsedId = parseInt(boardId, 10);
+    if (isNaN(parsedId)) return null;
+    return await queryOne('SELECT * FROM suggestion_boards WHERE id = $1', [parsedId]);
   },
 
   async listSuggestionBoards(guildId) {
@@ -204,7 +208,9 @@ module.exports = {
   },
 
   async deleteSuggestionBoard(boardId) {
-    await query('DELETE FROM suggestion_boards WHERE id = $1', [boardId]);
+    const parsedId = parseInt(boardId, 10);
+    if (isNaN(parsedId)) return;
+    await query('DELETE FROM suggestion_boards WHERE id = $1', [parsedId]);
   },
 
   // --- Tymczasowe kanały głosowe ---
