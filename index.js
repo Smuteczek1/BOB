@@ -1,13 +1,13 @@
-// Bezpieczne wczytywanie .env (nie wywala błędu na Renderze, gdzie pliku .env nie ma na GitHubie)
+// Bezpieczne wczytywanie .env
 try {
   process.loadEnvFile();
 } catch (err) {
-  // Ignoruj brak pliku .env w środowisku produkcyjnym (Render pobierze zmienne z panelu)
+  // Ignoruj brak pliku .env w środowisku produkcyjnym
 }
 
 const fs = require('node:fs');
 const path = require('node:path');
-const { Client, Collection, GatewayIntentBits, Partials } = require('discord.js');
+const { Client, Collection, GatewayIntentBits, Partials, MessageFlags } = require('discord.js');
 const db = require('./db');
 const {
   BUTTON_CUSTOM_ID_PREFIX,
@@ -27,10 +27,9 @@ const client = new Client({
     GatewayIntentBits.GuildVoiceStates,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.GuildMessageReactions,
-    GatewayIntentBits.GuildMembers, // potrzebne do nadawania ról po reakcji/przycisku
-    GatewayIntentBits.MessageContent, // potrzebne, żeby Bob mógł czytać treść pytań po oznaczeniu go (@Bob)
+    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.MessageContent,
   ],
-  // Partials - żeby reakcje działały nawet na wiadomościach spoza pamięci podręcznej bota (np. po restarcie)
   partials: [Partials.Message, Partials.Channel, Partials.Reaction, Partials.User, Partials.GuildMember],
 });
 
@@ -54,7 +53,7 @@ for (const file of fs.readdirSync(eventsPath).filter(f => f.endsWith('.js'))) {
   }
 }
 
-// --- Obsługa komend slash, przycisków propozycji/ról, formularzy i menu wyboru ---
+// --- Obsługa interakcji ---
 client.on('interactionCreate', async (interaction) => {
   try {
     if (interaction.isChatInputCommand()) {
@@ -64,20 +63,17 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
 
-    // Przycisk "Dodaj propozycję" - customId zawiera ID tablicy (board), np. "open_suggestion_modal:3"
     if (interaction.isButton() && interaction.customId.startsWith(BUTTON_CUSTOM_ID_PREFIX)) {
       const boardId = interaction.customId.slice(BUTTON_CUSTOM_ID_PREFIX.length);
       await interaction.showModal(buildModal(boardId));
       return;
     }
 
-    // Wysłany formularz nowej propozycji (tytuł/opis/zdjęcie)
     if (interaction.isModalSubmit() && interaction.customId.startsWith(MODAL_CUSTOM_ID_PREFIX)) {
       await handleModalSubmit(interaction);
       return;
     }
 
-    // Wysłany formularz "własny styl" z /setup-propozycje styl:Własny
     if (interaction.isModalSubmit() && interaction.customId.startsWith(STYLE_MODAL_CUSTOM_ID_PREFIX)) {
       await handleStyleModalSubmit(interaction);
       return;
@@ -94,7 +90,7 @@ client.on('interactionCreate', async (interaction) => {
     }
   } catch (err) {
     console.error('Błąd podczas obsługi interakcji:', err);
-    const payload = { content: '❌ Wystąpił błąd podczas wykonywania tej akcji.', ephemeral: true };
+    const payload = { content: '❌ Wystąpił błąd podczas wykonywania tej akcji.', flags: MessageFlags.Ephemeral };
     if (interaction.replied || interaction.deferred) {
       await interaction.followUp(payload).catch(() => null);
     } else {
@@ -103,21 +99,16 @@ client.on('interactionCreate', async (interaction) => {
   }
 });
 
-// --- Start bota + porządkowanie po restarcie ---
-client.once('ready', async () => {
+// --- Start bota ---
+client.once('clientReady', async () => {
   console.log(`✅ Zalogowano jako ${client.user.tag}`);
   await reconcileTempChannels();
 
-  // XP za aktywność głosową - co COOLDOWN_MS (domyślnie 10 minut) dostają je wszyscy,
-  // którzy w tym momencie siedzą na jakimś kanale głosowym (poza kanałem AFK).
   setInterval(() => {
     tickVoiceXp(client).catch(err => console.error('Błąd podczas przyznawania XP głosowego:', err));
   }, COOLDOWN_MS);
 });
 
-// Jeśli bot się zrestartuje, gdy jakieś tymczasowe kanały już istniały:
-// - jeśli kanał zniknął albo jest pusty -> usuwamy wpis / kanał
-// - jeśli ma ludzi -> zostawiamy go dalej, po prostu nie liczymy retroaktywnie czasu sprzed restartu
 async function reconcileTempChannels() {
   const tempChannels = db.getAllTempChannels();
   for (const temp of tempChannels) {
