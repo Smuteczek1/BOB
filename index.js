@@ -110,7 +110,7 @@ client.once('clientReady', async () => {
 });
 
 async function reconcileTempChannels() {
-  const tempChannels = db.getAllTempChannels();
+  const tempChannels = await db.getAllTempChannels();
   for (const temp of tempChannels) {
     try {
       const guild = await client.guilds.fetch(temp.guild_id).catch(() => null);
