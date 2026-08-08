@@ -13,7 +13,7 @@ module.exports = {
 
   async execute(interaction) {
     const target = interaction.options.getUser('uzytkownik') ?? interaction.user;
-    const row = db.getUserLevel(interaction.guild.id, target.id);
+    const row = await db.getUserLevel(interaction.guild.id, target.id);
 
     if (!row) {
       await interaction.reply({
