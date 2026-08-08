@@ -114,6 +114,15 @@ async function initDb() {
 
       CREATE INDEX IF NOT EXISTS idx_suggestion_boards_guild ON suggestion_boards(guild_id);
       CREATE INDEX IF NOT EXISTS idx_suggestion_boards_create_channel ON suggestion_boards(create_channel_id);
+
+      -- Tabela do obsługi profili użytkowników (punkty i nagroda dzienna)
+      CREATE TABLE IF NOT EXISTS user_profiles (
+        guild_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        points INT NOT NULL DEFAULT 0,
+        last_daily BIGINT,
+        PRIMARY KEY (guild_id, user_id)
+      );
     `);
     console.log('✅ Baza danych Supabase (PostgreSQL) została pomyślnie zainicjalizowana.');
   } catch (err) {
@@ -172,7 +181,7 @@ module.exports = {
     }
   },
 
-// --- Tablice propozycji ---
+  // --- Tablice propozycji ---
   async createSuggestionBoard(guildId, { listChannelId, createChannelId, promptText, buttonLabel, upvoteEmoji, downvoteEmoji }) {
     const res = await queryOne(`
       INSERT INTO suggestion_boards (guild_id, list_channel_id, create_channel_id, prompt_text, button_label, upvote_emoji, downvote_emoji, created_at)
@@ -392,5 +401,33 @@ module.exports = {
 
   async getLevelRoles(guildId) {
     return await queryMany('SELECT * FROM level_roles WHERE guild_id = $1 ORDER BY level DESC', [guildId]);
+  },
+
+  // --- Profil użytkownika / Nagroda Dzienna ---
+  async getUserProfile(guildId, userId) {
+    let row = await queryOne('SELECT * FROM user_profiles WHERE guild_id = $1 AND user_id = $2', [guildId, userId]);
+    if (!row) {
+      row = await queryOne(`
+        INSERT INTO user_profiles (guild_id, user_id, points, last_daily)
+        VALUES ($1, $2, 0, NULL)
+        RETURNING *
+      `, [guildId, userId]);
+    }
+    return row;
+  },
+
+  async claimDaily(guildId, userId, rewardAmount) {
+    const profile = await this.getUserProfile(guildId, userId);
+    if (!profile) return null;
+
+    const newPoints = Number(profile.points || 0) + rewardAmount;
+    const now = Date.now();
+
+    return await queryOne(`
+      UPDATE user_profiles
+      SET points = $1, last_daily = $2
+      WHERE guild_id = $3 AND user_id = $4
+      RETURNING *
+    `, [newPoints, now, guildId, userId]);
   },
 };
