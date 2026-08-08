@@ -1,4 +1,4 @@
-const { SlashCommandBuilder, ChannelType, PermissionFlagsBits } = require('discord.js');
+const { SlashCommandBuilder, ChannelType, PermissionFlagsBits, EmbedBuilder, MessageFlags } = require('discord.js');
 const db = require('../db');
 const {
   parseEmojiInput,
@@ -89,31 +89,36 @@ module.exports = {
 };
 
 async function handleCreate(interaction) {
-  await interaction.deferReply({ ephemeral: true });
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
   const channel = interaction.options.getChannel('kanal');
   const mode = interaction.options.getString('tryb');
   const title = interaction.options.getString('tytul');
   const description = interaction.options.getString('opis');
 
-  const panel = db.createRolePanel(interaction.guild.id, {
+  const panel = await db.createRolePanel(interaction.guild.id, {
     channelId: channel.id,
     mode,
     title,
     description,
   });
 
+  if (!panel) {
+    await interaction.editReply({ content: '❌ Nie udało się utworzyć panelu w bazie danych.' });
+    return;
+  }
+
   const embed = buildPanelEmbed(panel, [], interaction.guild);
   const components = buildPanelComponents(panel, []);
 
   const message = await channel.send({ embeds: [embed], components }).catch(() => null);
   if (!message) {
-    db.deleteRolePanel(panel.id);
+    await db.deleteRolePanel(panel.id);
     await interaction.editReply({ content: '❌ Nie udało się wysłać wiadomości panelu. Sprawdź uprawnienia bota na kanale.' });
     return;
   }
 
-  db.setRolePanelMessageId(panel.id, message.id);
+  await db.setRolePanelMessageId(panel.id, message.id);
 
   await interaction.editReply({
     content:
@@ -124,14 +129,14 @@ async function handleCreate(interaction) {
 }
 
 async function handleAdd(interaction) {
-  await interaction.deferReply({ ephemeral: true });
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
   const panelId = interaction.options.getInteger('panel');
   const role = interaction.options.getRole('rola');
   const emojiRawInput = interaction.options.getString('emoji');
   const etykieta = interaction.options.getString('etykieta');
 
-  const panel = db.getRolePanel(panelId);
+  const panel = await db.getRolePanel(panelId);
   if (!panel || panel.guild_id !== interaction.guild.id) {
     await interaction.editReply({ content: `⚠️ Nie znaleziono panelu #${panelId} na tym serwerze.` });
     return;
@@ -151,7 +156,7 @@ async function handleAdd(interaction) {
   const customId = panel.mode === 'button' ? `role_btn_${panel.id}_${role.id}` : null;
   const label = etykieta ?? role.name;
 
-  db.addRolePanelItem(panel.id, {
+  await db.addRolePanelItem(panel.id, {
     roleId: role.id,
     emojiKey: parsedEmoji.key,
     emojiRaw: parsedEmoji.raw,
@@ -165,28 +170,28 @@ async function handleAdd(interaction) {
 }
 
 async function handleRemove(interaction) {
-  await interaction.deferReply({ ephemeral: true });
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
   const panelId = interaction.options.getInteger('panel');
   const role = interaction.options.getRole('rola');
 
-  const panel = db.getRolePanel(panelId);
+  const panel = await db.getRolePanel(panelId);
   if (!panel || panel.guild_id !== interaction.guild.id) {
     await interaction.editReply({ content: `⚠️ Nie znaleziono panelu #${panelId} na tym serwerze.` });
     return;
   }
 
-  db.removeRolePanelItemByRole(panel.id, role.id);
+  await db.removeRolePanelItemByRole(panel.id, role.id);
   await refreshPanelMessage(interaction.client, panel.id);
 
   await interaction.editReply({ content: `✅ Usunięto rolę **${role.name}** z panelu #${panel.id}.` });
 }
 
 async function handleDeletePanel(interaction) {
-  await interaction.deferReply({ ephemeral: true });
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
   const panelId = interaction.options.getInteger('panel');
-  const panel = db.getRolePanel(panelId);
+  const panel = await db.getRolePanel(panelId);
   if (!panel || panel.guild_id !== interaction.guild.id) {
     await interaction.editReply({ content: `⚠️ Nie znaleziono panelu #${panelId} na tym serwerze.` });
     return;
@@ -198,24 +203,45 @@ async function handleDeletePanel(interaction) {
     if (message) await message.delete().catch(() => null);
   }
 
-  db.deleteRolePanel(panel.id);
+  await db.deleteRolePanel(panel.id);
 
   await interaction.editReply({ content: `🗑️ Usunięto panel #${panelId} razem z wiadomością.` });
 }
 
 async function handleList(interaction) {
-  const panels = db.listRolePanels(interaction.guild.id);
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+  let rawPanels = await db.listRolePanels?.(interaction.guild.id) || await db.getRolePanels?.(interaction.guild.id);
+
+  // Zabezpieczenie przed brakiem danych / inną strukturą z Supabase
+  let panels = [];
+  if (Array.isArray(rawPanels)) {
+    panels = rawPanels;
+  } else if (rawPanels && Array.isArray(rawPanels.data)) {
+    panels = rawPanels.data;
+  }
 
   if (panels.length === 0) {
-    await interaction.reply({ content: 'Brak paneli ról na tym serwerze. Użyj `/rola-panel utworz`.', ephemeral: true });
+    await interaction.editReply({ content: '📋 Brak paneli ról na tym serwerze. Użyj `/rola-panel utworz`.' });
     return;
   }
 
-  const lines = panels.map(panel => {
-    const items = db.getRolePanelItems(panel.id);
-    const modeLabel = panel.mode === 'emoji' ? 'emotki' : 'przyciski';
-    return `**#${panel.id}** — <#${panel.channel_id}> — tryb: ${modeLabel} — ról: ${items.length}`;
-  });
+  const lines = await Promise.all(
+    panels.map(async panel => {
+      let items = await db.getRolePanelItems(panel.id);
+      if (items && Array.isArray(items.data)) items = items.data;
+      const itemCount = Array.isArray(items) ? items.length : 0;
 
-  await interaction.reply({ content: lines.join('\n'), ephemeral: true });
+      const modeLabel = panel.mode === 'emoji' ? 'emotki' : 'przyciski';
+      return `• **ID:** \`${panel.id}\` — <#${panel.channel_id}> — tryb: **${modeLabel}** — ról: **${itemCount}**`;
+    })
+  );
+
+  const embed = new EmbedBuilder()
+    .setTitle('⚙️ Lista paneli ról')
+    .setColor(0x3498db)
+    .setDescription(lines.join('\n'))
+    .setTimestamp();
+
+  await interaction.editReply({ embeds: [embed] });
 }
