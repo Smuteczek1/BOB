@@ -164,9 +164,16 @@ async function handleAdd(interaction) {
     customId,
   });
 
-  await refreshPanelMessage(interaction.client, panel.id);
+  const success = await refreshPanelMessage(interaction.client, panel.id);
 
-  await interaction.editReply({ content: `✅ Dodano rolę **${role.name}** do panelu #${panel.id}.` });
+  if (!success) {
+    await interaction.editReply({ 
+      content: `⚠️ Dodano rolę **${role.name}** do bazy danych, ale nie udało się odświeżyć wiadomości panelu na kanale. Upewnij się, że oryginalna wiadomość z panelem nie została usunięta.` 
+    });
+    return;
+  }
+
+  await interaction.editReply({ content: `✅ Dodano rolę **${role.name}** do panelu #${panel.id} i zaktualizowano panel na kanale!` });
 }
 
 async function handleRemove(interaction) {
@@ -213,7 +220,6 @@ async function handleList(interaction) {
 
   let rawPanels = await db.listRolePanels?.(interaction.guild.id) || await db.getRolePanels?.(interaction.guild.id);
 
-  // Zabezpieczenie przed brakiem danych / inną strukturą z Supabase
   let panels = [];
   if (Array.isArray(rawPanels)) {
     panels = rawPanels;
