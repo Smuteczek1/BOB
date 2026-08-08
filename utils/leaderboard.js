@@ -12,14 +12,15 @@ function formatDuration(totalSeconds) {
   return parts.join(' ');
 }
 
-function buildLeaderboardEmbed(guild) {
-  const topAllTime = db.getTopAllTime(guild.id, 5);
-  const topMonth = db.getTopThisMonth(guild.id, 5);
+async function buildLeaderboardEmbed(guild) {
+  // Pobieranie danych z bazy z użyciem await
+  const topAllTime = await db.getTopAllTime(guild.id, 5);
+  const topMonth = await db.getTopThisMonth(guild.id, 5);
 
   const monthName = new Date().toLocaleString('pl-PL', { month: 'long', year: 'numeric' });
 
   const formatList = (rows) => {
-    if (rows.length === 0) return '_Brak danych jeszcze_';
+    if (!rows || rows.length === 0) return '_Brak danych jeszcze_';
     return rows
       .map((row, i) => {
         const medal = ['🥇', '🥈', '🥉', '🏅', '🏅'][i] ?? '▫️';
@@ -41,7 +42,8 @@ function buildLeaderboardEmbed(guild) {
 }
 
 async function updateLeaderboard(client, guildId) {
-  const config = db.getGuildConfig(guildId);
+  // Dodane await do pobierania konfiguracji z bazy
+  const config = await db.getGuildConfig(guildId);
   if (!config || !config.stats_channel_id) return;
 
   const guild = await client.guilds.fetch(guildId).catch(() => null);
@@ -50,7 +52,8 @@ async function updateLeaderboard(client, guildId) {
   const channel = await guild.channels.fetch(config.stats_channel_id).catch(() => null);
   if (!channel || !channel.isTextBased()) return;
 
-  const embed = buildLeaderboardEmbed(guild);
+  // Funkcja budująca embed też stała się asynchroniczna przez zapytania do bazy
+  const embed = await buildLeaderboardEmbed(guild);
 
   // Próbujemy edytować istniejącą wiadomość, żeby nie zaśmiecać kanału
   if (config.leaderboard_message_id) {
@@ -63,7 +66,8 @@ async function updateLeaderboard(client, guildId) {
 
   const sentMsg = await channel.send({ embeds: [embed] }).catch(() => null);
   if (sentMsg) {
-    db.setLeaderboardMessageId(guildId, sentMsg.id);
+    // Dodane await przy zapisie ID wiadomości
+    await db.setLeaderboardMessageId(guildId, sentMsg.id);
   }
 }
 
