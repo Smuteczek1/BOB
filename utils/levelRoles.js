@@ -8,15 +8,12 @@ const db = require('../db');
 
 const LEVEL_ROLE_SELECT_CUSTOM_ID = 'level_role_remove_select';
 
-// Sprawdza jaka rola przysługuje na danym poziomie i synchronizuje ją użytkownikowi:
-// - usuwa WSZYSTKIE inne role z tej drabinki (żeby nie stakować, tylko zawsze mieć jedną, aktualną)
-// - nadaje właściwą rolę, jeśli jej jeszcze nie ma
 async function syncLevelRole(client, guildId, userId, level) {
-  const tiers = db.getLevelRoles(guildId); // posortowane malejąco po poziomie
-  if (tiers.length === 0) return;
+  const tiers = await db.getLevelRoles(guildId);
+  if (!tiers || tiers.length === 0) return;
 
   const applicable = tiers.find(t => t.level <= level);
-  if (!applicable) return; // brak roli obejmującej tak niski poziom (np. nie ustawiono roli na poziomie 0)
+  if (!applicable) return;
 
   const guild = await client.guilds.fetch(guildId).catch(() => null);
   if (!guild) return;
@@ -39,11 +36,9 @@ async function syncLevelRole(client, guildId, userId, level) {
   }
 }
 
-// Buduje embed + listę rozwijaną (select menu) do /rola-poziom lista.
-// Wybranie pozycji z listy usuwa dany poziom z drabinki (obsługuje to handleLevelRoleSelectMenu).
-function buildLevelRolesListPayload(guild) {
-  const tiers = db.getLevelRoles(guild.id); // malejąco po poziomie
-  if (tiers.length === 0) {
+async function buildLevelRolesListPayload(guild) {
+  const tiers = await db.getLevelRoles(guild.id);
+  if (!tiers || tiers.length === 0) {
     return {
       content: '⚠️ Nie masz jeszcze skonfigurowanej drabinki ról - użyj najpierw `/rola-poziom ustaw`.',
       components: [],
@@ -58,7 +53,6 @@ function buildLevelRolesListPayload(guild) {
     .setDescription(sortedAsc.map(t => `**Poziom ${t.level}** — <@&${t.role_id}>`).join('\n'))
     .setFooter({ text: 'Wybierz pozycję z listy poniżej, żeby usunąć ją z drabinki.' });
 
-  // Discord select menu pozwala max 25 opcji - jeśli masz więcej poziomów, tniemy do pierwszych 25
   const options = sortedAsc.slice(0, 25).map(t => {
     const role = guild.roles.cache.get(t.role_id);
     return new StringSelectMenuOptionBuilder()
@@ -76,13 +70,12 @@ function buildLevelRolesListPayload(guild) {
   return { embeds: [embed], components: [row] };
 }
 
-// Obsługa wyboru z listy rozwijanej - usuwa wybrany poziom z drabinki
 async function handleLevelRoleSelectMenu(interaction) {
   const level = parseInt(interaction.values[0], 10);
-  const tiers = db.getLevelRoles(interaction.guild.id);
-  const tier = tiers.find(t => t.level === level);
+  const tiers = await db.getLevelRoles(interaction.guild.id);
+  const tier = tiers ? tiers.find(t => t.level === level) : null;
 
-  db.removeLevelRole(interaction.guild.id, level);
+  await db.removeLevelRole(interaction.guild.id, level);
 
   await interaction.update({
     content: tier
