@@ -44,7 +44,7 @@ if (fs.existsSync(commandsPath)) {
   }
 }
 
-// --- Ładowanie eventów ---
+// --- Ładowanie eventów z folderu /events ---
 const eventsPath = path.join(__dirname, 'events');
 if (fs.existsSync(eventsPath)) {
   for (const file of fs.readdirSync(eventsPath).filter(f => f.endsWith('.js'))) {
@@ -104,7 +104,7 @@ client.on('interactionCreate', async (interaction) => {
 });
 
 // --- Start bota ---
-client.once('clientReady', async () => {
+client.once('ready', async () => {
   console.log(`✅ Zalogowano jako ${client.user.tag}`);
   await reconcileTempChannels();
 
@@ -115,6 +115,8 @@ client.once('clientReady', async () => {
 
 async function reconcileTempChannels() {
   const tempChannels = await db.getAllTempChannels();
+  if (!tempChannels) return;
+
   for (const temp of tempChannels) {
     try {
       const guild = await client.guilds.fetch(temp.guild_id).catch(() => null);
@@ -123,7 +125,6 @@ async function reconcileTempChannels() {
         continue;
       }
       
-      // Użycie fetch ze skróconym opóźnieniem zapewni sprawdzenie rzeczywistej liczby członków
       const channel = await guild.channels.fetch(temp.channel_id, { force: true }).catch(() => null);
       if (!channel) {
         await db.removeTempChannel(temp.channel_id);
