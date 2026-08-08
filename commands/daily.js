@@ -12,7 +12,7 @@ module.exports = {
     const userId = interaction.user.id;
     const guildId = interaction.guild.id;
 
-    // Sprawdzanie czy minęły 24h od ostatniego odbioru
+    // 1. Sprawdzanie czy minęły 24h od ostatniego odbioru
     const canClaim = await db.canClaimDaily(guildId, userId);
     if (!canClaim) {
       await interaction.reply({
@@ -22,7 +22,7 @@ module.exports = {
       return;
     }
 
-    // Losowanie Tieru Skrzyni (0.00 - 1.00)
+    // 2. Losowanie Tieru Skrzyni (0.00 - 1.00)
     const roll = Math.random();
     let tier = '';
     let color = 0x000000;
@@ -57,14 +57,15 @@ module.exports = {
 
     const rewardXp = Math.floor(Math.random() * (maxXp - minXp + 1)) + minXp;
 
-    // Zapis w bazie i dodanie XP
-    await db.setDailyClaimed(guildId, userId);
+    // 3. Zapis w bazie (oznaczenie odbioru) oraz przyznanie XP
+    await db.setDailyClaimed(userId, guildId, 1);
     const { oldLevel, newLevel } = await db.addXp(guildId, userId, rewardXp, 'daily', levelForXp);
 
     if (newLevel > oldLevel) {
       await syncLevelRole(interaction.client, guildId, userId, newLevel);
     }
 
+    // 4. Odpowiedź z Embedem
     const embed = new EmbedBuilder()
       .setTitle('🎁 Dzienny Prezent Odbierania XP')
       .setColor(color)
