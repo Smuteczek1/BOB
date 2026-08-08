@@ -5,6 +5,7 @@ try {
   // Ignoruj brak pliku .env w środowisku produkcyjnym
 }
 
+const express = require('express'); // <-- Wczytanie Express
 const fs = require('node:fs');
 const path = require('node:path');
 const { Client, Collection, GatewayIntentBits, Partials, MessageFlags, REST, Routes } = require('discord.js');
@@ -21,6 +22,19 @@ const { handleRoleButtonClick } = require('./utils/rolePanels');
 const { tickVoiceXp, COOLDOWN_MS } = require('./utils/leveling');
 const { LEVEL_ROLE_SELECT_CUSTOM_ID, handleLevelRoleSelectMenu } = require('./utils/levelRoles');
 
+// --- Uruchomienie prostego serwera HTTP dla Render.com ---
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+app.get('/', (req, res) => {
+  res.send('🤖 Bot działa poprawnie 24/7!');
+});
+
+app.listen(PORT, () => {
+  console.log(`🌐 Serwer HTTP dla Render uruchomiony na porcie ${PORT}`);
+});
+
+// --- Konfiguracja Klienta Discord ---
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -104,7 +118,7 @@ client.on('interactionCreate', async (interaction) => {
 });
 
 // --- Start bota ---
-client.once('clientReady', async () => {
+client.once('ready', async () => {
   console.log(`✅ Zalogowano jako ${client.user.tag}`);
 
   // 1. Automatyczne odświeżenie i rejestracja komend Slash w API Discorda
@@ -140,7 +154,7 @@ async function registerSlashCommands() {
       { body: commandsData }
     );
 
-    console.log('✅ Wszystkie komendy Slash (w tym /daily) zostały zarejestrowane!');
+    console.log('✅ Wszystkie komendy Slash (w tym /nagroda) zostały zarejestrowane!');
   } catch (error) {
     console.error('❌ Błąd podczas rejestracji komend Slash:', error);
   }
