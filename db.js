@@ -4,11 +4,11 @@ const { Pool } = require('pg');
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: {
-    rejectUnauthorized: false, // Wymagane dla bezpiecznego połączenia z Supabase na Renderze
+    rejectUnauthorized: false,
   },
 });
 
-// Pomocnicze funkcje do wykonywania zapytań SQL z parametryzacją ($1, $2, ...)
+// Pomocnicze funkcje do wykonywania zapytań SQL
 async function query(text, params) {
   return await pool.query(text, params);
 }
@@ -23,7 +23,7 @@ async function queryMany(text, params) {
   return res.rows;
 }
 
-// Funkcja inicjalizująca tabele w PostgreSQL
+// Inicjalizacja struktur bazy danych
 async function initDb() {
   try {
     await query(`
@@ -89,6 +89,7 @@ async function initDb() {
         xp INT NOT NULL DEFAULT 0,
         level INT NOT NULL DEFAULT 0,
         last_text_xp_at BIGINT,
+        last_daily_at BIGINT,
         PRIMARY KEY (guild_id, user_id)
       );
 
@@ -114,23 +115,19 @@ async function initDb() {
 
       CREATE INDEX IF NOT EXISTS idx_suggestion_boards_guild ON suggestion_boards(guild_id);
       CREATE INDEX IF NOT EXISTS idx_suggestion_boards_create_channel ON suggestion_boards(create_channel_id);
-
-      -- Tabela do obsługi profili użytkowników (punkty i nagroda dzienna)
-      CREATE TABLE IF NOT EXISTS user_profiles (
-        guild_id TEXT NOT NULL,
-        user_id TEXT NOT NULL,
-        points INT NOT NULL DEFAULT 0,
-        last_daily BIGINT,
-        PRIMARY KEY (guild_id, user_id)
-      );
     `);
+
+    // Bezpieczne dodanie kolumny last_daily_at, jeśli tabela user_levels już istniała bez niej
+    await query(`
+      ALTER TABLE user_levels ADD COLUMN IF NOT EXISTS last_daily_at BIGINT;
+    `);
+
     console.log('✅ Baza danych Supabase (PostgreSQL) została pomyślnie zainicjalizowana.');
   } catch (err) {
     console.error('❌ Błąd podczas inicjalizacji bazy PostgreSQL:', err);
   }
 }
 
-// Uruchamiamy automatyczną kreację struktur tabel
 initDb();
 
 module.exports = {
@@ -387,6 +384,31 @@ module.exports = {
     `, [guildId, limit]);
   },
 
+  // --- NAGRODA DZIENNA (Daily XP) ---
+  async canClaimDaily(guildId, userId) {
+    const row = await this.getUserLevel(guildId, userId);
+    if (!row || !row.last_daily_at) return true;
+
+    const cooldownMs = 24 * 60 * 60 * 1000; // 24 godziny
+    return Date.now() - Number(row.last_daily_at) >= cooldownMs;
+  },
+
+  async setDailyClaimed(guildId, userId) {
+    const now = Date.now();
+    const existing = await this.getUserLevel(guildId, userId);
+
+    if (!existing) {
+      await query(`
+        INSERT INTO user_levels (guild_id, user_id, xp, level, last_daily_at)
+        VALUES ($1, $2, 0, 0, $3)
+      `, [guildId, userId, now]);
+    } else {
+      await query(`
+        UPDATE user_levels SET last_daily_at = $1 WHERE guild_id = $2 AND user_id = $3
+      `, [guildId, userId]);
+    }
+  },
+
   // --- Drabinka ról za poziomy ---
   async setLevelRole(guildId, level, roleId) {
     await query(`
@@ -401,33 +423,5 @@ module.exports = {
 
   async getLevelRoles(guildId) {
     return await queryMany('SELECT * FROM level_roles WHERE guild_id = $1 ORDER BY level DESC', [guildId]);
-  },
-
-  // --- Profil użytkownika / Nagroda Dzienna ---
-  async getUserProfile(guildId, userId) {
-    let row = await queryOne('SELECT * FROM user_profiles WHERE guild_id = $1 AND user_id = $2', [guildId, userId]);
-    if (!row) {
-      row = await queryOne(`
-        INSERT INTO user_profiles (guild_id, user_id, points, last_daily)
-        VALUES ($1, $2, 0, NULL)
-        RETURNING *
-      `, [guildId, userId]);
-    }
-    return row;
-  },
-
-  async claimDaily(guildId, userId, rewardAmount) {
-    const profile = await this.getUserProfile(guildId, userId);
-    if (!profile) return null;
-
-    const newPoints = Number(profile.points || 0) + rewardAmount;
-    const now = Date.now();
-
-    return await queryOne(`
-      UPDATE user_profiles
-      SET points = $1, last_daily = $2
-      WHERE guild_id = $3 AND user_id = $4
-      RETURNING *
-    `, [newPoints, now, guildId, userId]);
   },
 };
