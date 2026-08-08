@@ -1,4 +1,4 @@
-const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
+const { SlashCommandBuilder, PermissionFlagsBits, EmbedBuilder, MessageFlags } = require('discord.js');
 const db = require('../db');
 const { syncLevelRole, buildLevelRolesListPayload } = require('../utils/levelRoles');
 
@@ -43,7 +43,7 @@ module.exports = {
 };
 
 async function handleSet(interaction) {
-  await interaction.deferReply({ ephemeral: true });
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
   const level = interaction.options.getInteger('poziom');
   const role = interaction.options.getRole('rola');
@@ -58,7 +58,7 @@ async function handleSet(interaction) {
     return;
   }
 
-  db.setLevelRole(interaction.guild.id, level, role.id);
+  await db.setLevelRole(interaction.guild.id, level, role.id);
 
   await interaction.editReply({
     content: `✅ Od poziomu **${level}** użytkownicy będą automatycznie dostawać rolę **${role.name}** (i tracić poprzednią z tej drabinki).`,
@@ -66,24 +66,47 @@ async function handleSet(interaction) {
 }
 
 async function handleRemove(interaction) {
-  await interaction.deferReply({ ephemeral: true });
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
   const level = interaction.options.getInteger('poziom');
-  db.removeLevelRole(interaction.guild.id, level);
+  await db.removeLevelRole(interaction.guild.id, level);
 
   await interaction.editReply({ content: `✅ Usunięto przypisanie roli dla poziomu **${level}** z drabinki.` });
 }
 
 async function handleList(interaction) {
-  const payload = buildLevelRolesListPayload(interaction.guild);
-  await interaction.reply({ ...payload, ephemeral: true });
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+  const tiers = await db.getLevelRoles(interaction.guild.id);
+
+  // Bezpiecznik: Jeśli brak ról w bazie – wyślij czytelny komunikat zamiast pustego błędu
+  if (!tiers || tiers.length === 0) {
+    await interaction.editReply({
+      content: '📋 Na tym serwerze nie skonfigurowano jeszcze żadnych ról za poziomy. Użyj `/rola-poziom ustaw`, aby dodać pierwszą.',
+    });
+    return;
+  }
+
+  // Formatowanie listy ról
+  const sorted = [...tiers].sort((a, b) => a.required_level - b.required_level);
+  const listText = sorted
+    .map(r => `• **Poziom ${r.required_level}:** <@&${r.role_id}>`)
+    .join('\n');
+
+  const embed = new EmbedBuilder()
+    .setTitle('🏆 Drabinka ról za poziomy')
+    .setColor(0x3498db)
+    .setDescription(listText)
+    .setTimestamp();
+
+  await interaction.editReply({ embeds: [embed] });
 }
 
 async function handleSync(interaction) {
-  await interaction.deferReply({ ephemeral: true });
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
-  const tiers = db.getLevelRoles(interaction.guild.id);
-  if (tiers.length === 0) {
+  const tiers = await db.getLevelRoles(interaction.guild.id);
+  if (!tiers || tiers.length === 0) {
     await interaction.editReply({ content: '⚠️ Nie masz jeszcze skonfigurowanej drabinki ról - użyj najpierw `/rola-poziom ustaw`.' });
     return;
   }
@@ -100,9 +123,7 @@ async function handleSync(interaction) {
   for (const member of members.values()) {
     if (member.user.bot) continue;
     try {
-      // Osoby, które nigdy nie zebrały XP (np. istniejący od dawna członkowie, zanim był ten system)
-      // traktujemy jako poziom 0 - dostaną najniższą rolę z drabinki, jeśli jej jeszcze nie mają.
-      const existing = db.getUserLevel(interaction.guild.id, member.id);
+      const existing = await db.getUserLevel(interaction.guild.id, member.id);
       const level = existing ? existing.level : 0;
       await syncLevelRole(interaction.client, interaction.guild.id, member.id, level);
       updated++;
