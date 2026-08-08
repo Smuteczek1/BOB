@@ -302,7 +302,7 @@ module.exports = {
     const countRow = await queryOne('SELECT COUNT(*)::int as c FROM role_panel_items WHERE panel_id = $1', [panelId]);
     const position = countRow ? countRow.c : 0;
     return await queryOne(`
-      INSERT INTO role_panel_items (panel_id, role_id, emoji_key, emoji_raw, label, custom_id, position)
+      INSERT INTO role_panel_items (panel_id, role_id, emoji_key, emojiRaw, label, custom_id, position)
       VALUES ($1, $2, $3, $4, $5, $6, $7)
       RETURNING *
     `, [panelId, roleId, emojiKey ?? null, emojiRaw ?? null, label ?? null, customId ?? null, position]);
@@ -405,7 +405,7 @@ module.exports = {
     } else {
       await query(`
         UPDATE user_levels SET last_daily_at = $1 WHERE guild_id = $2 AND user_id = $3
-      `, [guildId, userId]);
+      `, [now, guildId, userId]);
     }
   },
 
