@@ -104,7 +104,7 @@ client.on('interactionCreate', async (interaction) => {
 });
 
 // --- Start bota ---
-client.once('ready', async () => {
+client.once('clientReady', async () => {
   console.log(`✅ Zalogowano jako ${client.user.tag}`);
   await reconcileTempChannels();
 
