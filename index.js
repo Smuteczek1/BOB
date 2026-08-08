@@ -108,9 +108,14 @@ client.once('ready', async () => {
   console.log(`✅ Zalogowano jako ${client.user.tag}`);
   await reconcileTempChannels();
 
-  setInterval(() => {
-    tickVoiceXp(client).catch(err => console.error('Błąd podczas przyznawania XP głosowego:', err));
-  }, COOLDOWN_MS);
+  const scheduleVoiceTick = () => {
+    const randomMinutes = Math.floor(Math.random() * (10 - 5 + 1)) + 5; // 5 - 10 min
+    setTimeout(async () => {
+      await tickVoiceXp(client).catch(err => console.error('Błąd XP głosowego:', err));
+      scheduleVoiceTick();
+    }, randomMinutes * 60 * 1000);
+  };
+  scheduleVoiceTick();
 });
 
 async function reconcileTempChannels() {
