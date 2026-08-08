@@ -24,7 +24,18 @@ async function buildLeaderboardEmbed(guild) {
     return rows
       .map((row, i) => {
         const medal = ['🥇', '🥈', '🥉', '🏅', '🏅'][i] ?? '▫️';
-        const when = new Date(row.started_at).toLocaleDateString('pl-PL');
+        
+        // --- BEZPIECZNE PARSOWANIE DATY ---
+        let rawDate = row.started_at;
+        if (typeof rawDate === 'string' && !isNaN(rawDate)) {
+          rawDate = Number(rawDate); // konwersja ze stringa numerycznego na liczbę
+        }
+        const parsedDate = new Date(rawDate);
+        const when = !isNaN(parsedDate.getTime()) 
+          ? parsedDate.toLocaleDateString('pl-PL') 
+          : 'brak daty';
+        // -----------------------------------
+
         return `${medal} **${formatDuration(row.duration_seconds)}** — <@${row.creator_id ?? 'nieznany'}> (${when})`;
       })
       .join('\n');
