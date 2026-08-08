@@ -2,8 +2,8 @@ const { EmbedBuilder } = require('discord.js');
 const db = require('../db');
 const { syncLevelRole } = require('./levelRoles');
 
-// --- Konfiguracja (możesz dostosować pod wielkość swojego serwera) ---
-const COOLDOWN_MINUTES = Number(process.env.XP_COOLDOWN_MINUTES ?? 1); // "co ile" dostaje się XP z czatu/głosu
+// --- Konfiguracja ---
+const COOLDOWN_MINUTES = Number(process.env.XP_COOLDOWN_MINUTES ?? 1);
 const CHAT_XP_MIN = Number(process.env.XP_CHAT_MIN ?? 5);
 const CHAT_XP_MAX = Number(process.env.XP_CHAT_MAX ?? 10);
 const VOICE_XP_MIN = Number(process.env.XP_VOICE_MIN ?? 5);
@@ -18,13 +18,10 @@ function isMilestone(level) {
   return level > 900 && level % 100 === 0;
 }
 
-// Ile łącznego XP potrzeba, żeby przejść z poziomu (level) na (level+1).
-// Formuła podobna do popularnych botów typu MEE6 - każdy kolejny poziom wymaga trochę więcej XP.
 function xpNeededForLevel(level) {
   return 5 * level * level + 50 * level + 100;
 }
 
-// Oblicza poziom na podstawie łącznego zebranego XP
 function levelForXp(totalXp) {
   let level = 0;
   let remaining = totalXp;
@@ -39,7 +36,6 @@ function randomInt(min, max) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 
-// Ogłasza kamień milowy (jeśli został osiągnięty) na skonfigurowanym kanale poziomów
 async function announceIfMilestone(client, guildId, userId, oldLevel, newLevel) {
   if (newLevel <= oldLevel) return;
 
@@ -49,7 +45,7 @@ async function announceIfMilestone(client, guildId, userId, oldLevel, newLevel) 
   }
   if (milestonesHit.length === 0) return;
 
-  const config = db.getGuildConfig(guildId);
+  const config = await db.getGuildConfig(guildId);
   if (!config || !config.levels_channel_id) return;
 
   const guild = await client.guilds.fetch(guildId).catch(() => null);
@@ -72,10 +68,11 @@ async function announceIfMilestone(client, guildId, userId, oldLevel, newLevel) 
 async function grantTextXp(client, message) {
   if (message.author.bot || !message.guild) return;
 
-  if (!db.canGetTextXp(message.guild.id, message.author.id, COOLDOWN_MS)) return;
+  const canGet = await db.canGetTextXp(message.guild.id, message.author.id, COOLDOWN_MS);
+  if (!canGet) return;
 
   const amount = randomInt(CHAT_XP_MIN, CHAT_XP_MAX);
-  const { oldLevel, newLevel } = db.addXp(message.guild.id, message.author.id, amount, 'text', levelForXp);
+  const { oldLevel, newLevel } = await db.addXp(message.guild.id, message.author.id, amount, 'text', levelForXp);
 
   if (newLevel > oldLevel) {
     await syncLevelRole(client, message.guild.id, message.author.id, newLevel);
@@ -83,7 +80,7 @@ async function grantTextXp(client, message) {
   await announceIfMilestone(client, message.guild.id, message.author.id, oldLevel, newLevel);
 }
 
-// Wywoływane cyklicznie (co COOLDOWN_MINUTES) dla wszystkich aktualnie połączonych z kanałami głosowymi
+// Wywoływane cyklicznie dla wszystkich połączonych z kanałami głosowymi
 async function tickVoiceXp(client) {
   for (const guild of client.guilds.cache.values()) {
     for (const channel of guild.channels.cache.values()) {
@@ -93,7 +90,7 @@ async function tickVoiceXp(client) {
         if (member.user.bot) continue;
 
         const amount = randomInt(VOICE_XP_MIN, VOICE_XP_MAX);
-        const { oldLevel, newLevel } = db.addXp(guild.id, member.id, amount, 'voice', levelForXp);
+        const { oldLevel, newLevel } = await db.addXp(guild.id, member.id, amount, 'voice', levelForXp);
 
         if (newLevel > oldLevel) {
           await syncLevelRole(client, guild.id, member.id, newLevel);
