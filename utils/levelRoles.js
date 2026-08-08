@@ -12,7 +12,12 @@ async function syncLevelRole(client, guildId, userId, level) {
   const tiers = await db.getLevelRoles(guildId);
   if (!tiers || tiers.length === 0) return;
 
-  const applicable = tiers.find(t => t.level <= level);
+  // Pobieramy poziom niezależnie od nazwy kolumny w bazie (level / required_level)
+  const getLvl = t => t.level ?? t.required_level ?? 0;
+
+  // Sortujemy malejąco, aby znaleźć najwyższą osiągniętą rolę
+  const sortedDesc = [...tiers].sort((a, b) => getLvl(b) - getLvl(a));
+  const applicable = sortedDesc.find(t => getLvl(t) <= level);
   if (!applicable) return;
 
   const guild = await client.guilds.fetch(guildId).catch(() => null);
@@ -45,19 +50,21 @@ async function buildLevelRolesListPayload(guild) {
     };
   }
 
-  const sortedAsc = [...tiers].sort((a, b) => a.level - b.level);
+  const getLvl = t => t.level ?? t.required_level ?? 0;
+  const sortedAsc = [...tiers].sort((a, b) => getLvl(a) - getLvl(b));
 
   const embed = new EmbedBuilder()
     .setTitle('🏅 Drabinka ról za poziomy')
     .setColor(0x5865f2)
-    .setDescription(sortedAsc.map(t => `**Poziom ${t.level}** — <@&${t.role_id}>`).join('\n'))
+    .setDescription(sortedAsc.map(t => `**Poziom ${getLvl(t)}** — <@&${t.role_id}>`).join('\n'))
     .setFooter({ text: 'Wybierz pozycję z listy poniżej, żeby usunąć ją z drabinki.' });
 
   const options = sortedAsc.slice(0, 25).map(t => {
+    const lvl = getLvl(t);
     const role = guild.roles.cache.get(t.role_id);
     return new StringSelectMenuOptionBuilder()
-      .setLabel(`Poziom ${t.level}${role ? ` — ${role.name}` : ''}`.slice(0, 100))
-      .setValue(String(t.level));
+      .setLabel(`Poziom ${lvl}${role ? ` — ${role.name}` : ''}`.slice(0, 100))
+      .setValue(String(lvl));
   });
 
   const select = new StringSelectMenuBuilder()
@@ -73,7 +80,9 @@ async function buildLevelRolesListPayload(guild) {
 async function handleLevelRoleSelectMenu(interaction) {
   const level = parseInt(interaction.values[0], 10);
   const tiers = await db.getLevelRoles(interaction.guild.id);
-  const tier = tiers ? tiers.find(t => t.level === level) : null;
+  
+  const getLvl = t => t.level ?? t.required_level ?? 0;
+  const tier = tiers ? tiers.find(t => getLvl(t) === level) : null;
 
   await db.removeLevelRole(interaction.guild.id, level);
 
