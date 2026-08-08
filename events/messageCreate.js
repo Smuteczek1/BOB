@@ -1,19 +1,17 @@
 const { grantTextXp } = require('../utils/leveling');
 const { askBob } = require('../utils/bob');
 
-// Discord ma limit 2000 znaków na wiadomość - jeśli Bob się rozgada, przycinamy.
 const DISCORD_MESSAGE_LIMIT = 2000;
 const SAFE_TRIM_LIMIT = 1900;
 
 module.exports = {
   name: 'messageCreate',
   async execute(message) {
-    // XP za czat leci zawsze, niezależnie od tego czy ktoś pyta Boba
+    // XP za czat leci zawsze
     await grantTextXp(message.client, message);
 
     if (message.author.bot || !message.guild) return;
 
-    // Reagujemy tylko gdy ktoś bezpośrednio OZNACZY bota (@Bob), nie na każdą wzmiankę roli itp.
     if (!message.mentions.has(message.client.user.id)) return;
 
     await handleBobMention(message);
@@ -21,7 +19,6 @@ module.exports = {
 };
 
 async function handleBobMention(message) {
-  // Wyciągamy pytanie - usuwamy samo oznaczenie bota (<@ID> albo <@!ID>) z treści
   const mentionRegex = new RegExp(`<@!?${message.client.user.id}>`, 'g');
   const question = message.content.replace(mentionRegex, '').trim();
 
@@ -59,7 +56,7 @@ async function handleBobMention(message) {
   } catch (err) {
     console.error('Błąd podczas odpytywania Gemini (Bob):', err);
     await message
-      .reply('❌ Coś poszło nie tak przy odpytywaniu Gemini. Spróbuj ponownie za chwilę.')
+      .reply('❌ Coś poszło nie tak przy odpytywania Gemini. Spróbuj ponownie za chwilę.')
       .catch(() => null);
   }
 }
