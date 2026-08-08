@@ -8,9 +8,9 @@ module.exports = {
 
   async execute(interaction) {
     await interaction.deferReply();
-    const embed = buildLeaderboardEmbed(interaction.guild);
+    const embed = await buildLeaderboardEmbed(interaction.guild);
     await interaction.editReply({ embeds: [embed] });
-    // Odświeżamy też "stały" ranking na kanale statystyk, jeśli jest skonfigurowany
+
     await updateLeaderboard(interaction.client, interaction.guild.id);
   },
 };
