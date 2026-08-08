@@ -1,9 +1,9 @@
-const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
+const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, MessageFlags } = require('discord.js');
 const db = require('../db');
 
 // Rozpoznaje czy podane emoji to custom (<:nazwa:id> lub <a:nazwa:id>) czy zwykły unicode znak.
-// Zwraca "key" używany do dopasowywania reakcji (dla custom - ID, dla unicode - sam znak).
 function parseEmojiInput(raw) {
+  if (!raw) return { id: null, name: '❓', raw: '❓', key: '❓' };
   const trimmed = raw.trim();
   const customMatch = trimmed.match(/^<a?:(\w+):(\d+)>$/);
   if (customMatch) {
@@ -27,31 +27,36 @@ function buildPanelEmbed(panel, items, guild) {
     embed.setDescription(panel.description);
   }
 
-  if (items.length === 0) {
-    embed.addFields({ name: 'Brak ról', value: '_Panel jest jeszcze pusty - admin musi dodać role._' });
+  const safeItems = Array.isArray(items) ? items : [];
+
+  if (safeItems.length === 0) {
+    embed.addFields({ name: 'Brak ról', value: '_Panel jest jeszcze pusty - użyj `/rola-panel dodaj`, aby dodać role._' });
   } else if (panel.mode === 'emoji') {
-    const lines = items.map(item => `${item.emoji_raw ?? '❔'} — <@&${item.role_id}>`);
+    const lines = safeItems.map(item => `${item.emoji_raw ?? '❔'} — <@&${item.role_id}>`);
     embed.addFields({ name: 'Zareaguj, aby dostać rolę', value: lines.join('\n') });
   } else {
-    const lines = items.map(item => `${item.emoji_raw ?? ''} **${item.label ?? ''}** — <@&${item.role_id}>`);
+    const lines = safeItems.map(item => `${item.emoji_raw ?? ''} **${item.label ?? ''}** — <@&${item.role_id}>`);
     embed.addFields({ name: 'Kliknij przycisk, aby dostać rolę', value: lines.join('\n') });
   }
 
-  embed.setFooter({ text: panel.mode === 'emoji' ? 'Kliknij reakcję ponownie, żeby zdjąć rolę' : 'Kliknij przycisk ponownie, żeby zdjąć rolę' });
+  embed.setFooter({ 
+    text: panel.mode === 'emoji' ? 'Kliknij reakcję ponownie, żeby zdjąć rolę' : 'Kliknij przycisk ponownie, żeby zdjąć rolę' 
+  });
 
   return embed;
 }
 
 function buildPanelComponents(panel, items) {
-  if (panel.mode !== 'button' || items.length === 0) return [];
+  const safeItems = Array.isArray(items) ? items : [];
+  if (panel.mode !== 'button' || safeItems.length === 0) return [];
 
   const rows = [];
-  for (let i = 0; i < items.length; i += 5) {
-    const chunk = items.slice(i, i + 5);
+  for (let i = 0; i < safeItems.length; i += 5) {
+    const chunk = safeItems.slice(i, i + 5);
     const row = new ActionRowBuilder().addComponents(
       chunk.map(item => {
         const btn = new ButtonBuilder()
-          .setCustomId(item.custom_id)
+          .setCustomId(item.custom_id || `role_btn_${panel.id}_${item.role_id}`)
           .setLabel(item.label ?? 'Rola')
           .setStyle(ButtonStyle.Secondary);
         if (item.emoji_raw) {
@@ -67,21 +72,22 @@ function buildPanelComponents(panel, items) {
 }
 
 // Odświeża wiadomość panelu (embed + ewentualne przyciski) po każdej zmianie.
-// Jeśli tryb to 'emoji', dba też o to, żeby na wiadomości wisiały właściwe reakcje.
 async function refreshPanelMessage(client, panelId) {
-  const panel = db.getRolePanel(panelId);
-  if (!panel || !panel.message_id) return;
+  const panel = await db.getRolePanel(panelId);
+  if (!panel || !panel.message_id) return false;
 
   const guild = await client.guilds.fetch(panel.guild_id).catch(() => null);
-  if (!guild) return;
+  if (!guild) return false;
 
   const channel = await guild.channels.fetch(panel.channel_id).catch(() => null);
-  if (!channel || !channel.isTextBased()) return;
+  if (!channel || !channel.isTextBased()) return false;
 
   const message = await channel.messages.fetch(panel.message_id).catch(() => null);
-  if (!message) return;
+  if (!message) return false;
 
-  const items = db.getRolePanelItems(panelId);
+  let rawItems = await db.getRolePanelItems(panelId);
+  let items = Array.isArray(rawItems) ? rawItems : (rawItems?.data || []);
+
   const embed = buildPanelEmbed(panel, items, guild);
   const components = buildPanelComponents(panel, items);
 
@@ -92,12 +98,12 @@ async function refreshPanelMessage(client, panelId) {
       const already = message.reactions.cache.some(r =>
         item.emoji_key && (r.emoji.id === item.emoji_key || r.emoji.name === item.emoji_key),
       );
-      if (!already) {
+      if (!already && item.emoji_raw) {
         await message.react(item.emoji_raw).catch(() => null);
       }
     }
 
-    // Usuń reakcje, które już nie odpowiadają żadnej roli w panelu (np. po /rola-panel usun)
+    // Usuń stare reakcje po usunięciu roli
     for (const reaction of message.reactions.cache.values()) {
       const key = reaction.emoji.id ?? reaction.emoji.name;
       const stillConfigured = items.some(item => item.emoji_key === key);
@@ -107,36 +113,36 @@ async function refreshPanelMessage(client, panelId) {
     }
   }
 
-  return message;
+  return true;
 }
 
 // Obsługa kliknięcia przycisku roli - przełącza (toggle) rolę użytkownikowi
 async function handleRoleButtonClick(interaction) {
-  const item = db.getRolePanelItemByCustomId(interaction.customId);
-  if (!item) return false; // to nie jest przycisk panelu ról - niech obsłuży to coś innego
+  const item = await db.getRolePanelItemByCustomId(interaction.customId);
+  if (!item) return false;
 
-  const panel = db.getRolePanel(item.panel_id);
+  const panel = await db.getRolePanel(item.panel_id);
   const member = interaction.member;
   const role = await interaction.guild.roles.fetch(item.role_id).catch(() => null);
 
   if (!role) {
-    await interaction.reply({ content: '⚠️ Ta rola już nie istnieje. Poinformuj administratora.', ephemeral: true });
+    await interaction.reply({ content: '⚠️ Ta rola już nie istnieje w ustawieniach serwera.', flags: MessageFlags.Ephemeral });
     return true;
   }
 
   try {
     if (member.roles.cache.has(role.id)) {
       await member.roles.remove(role);
-      await interaction.reply({ content: `➖ Zdjęto rolę **${role.name}**.`, ephemeral: true });
+      await interaction.reply({ content: `➖ Zdjęto rolę **${role.name}**.`, flags: MessageFlags.Ephemeral });
     } else {
       await member.roles.add(role);
-      await interaction.reply({ content: `➕ Nadano rolę **${role.name}**!`, ephemeral: true });
+      await interaction.reply({ content: `➕ Nadano rolę **${role.name}**!`, flags: MessageFlags.Ephemeral });
     }
   } catch (err) {
     console.error('Błąd podczas nadawania/zdejmowania roli (przycisk):', err);
     await interaction.reply({
-      content: '❌ Nie udało się zmienić roli. Sprawdź, czy rola bota jest WYŻEJ niż ta rola w ustawieniach serwera.',
-      ephemeral: true,
+      content: '❌ Nie udało się zmienić roli. Upewnij się, że rola bota znajduje się **WYŻEJ** w hierarchii serwera niż nadawana rola.',
+      flags: MessageFlags.Ephemeral,
     });
   }
   return true;
@@ -154,11 +160,11 @@ async function handleReactionToggle(reaction, user, added) {
     await reaction.message.fetch().catch(() => null);
   }
 
-  const panel = db.getRolePanelByMessageId(reaction.message.id);
+  const panel = await db.getRolePanelByMessageId(reaction.message.id);
   if (!panel || panel.mode !== 'emoji') return;
 
   const emojiKey = reaction.emoji.id ?? reaction.emoji.name;
-  const item = db.getRolePanelItemByEmojiKey(panel.id, emojiKey);
+  const item = await db.getRolePanelItemByEmojiKey(panel.id, emojiKey);
   if (!item) return;
 
   const guild = reaction.message.guild;
