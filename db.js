@@ -389,8 +389,16 @@ module.exports = {
     const row = await this.getUserLevel(guildId, userId);
     if (!row || !row.last_daily_at) return true;
 
-    const cooldownMs = 24 * 60 * 60 * 1000; // 24 godziny
-    return Date.now() - Number(row.last_daily_at) >= cooldownMs;
+    const lastClaimDate = new Date(Number(row.last_daily_at));
+    const now = new Date();
+
+    // Reset następuje o północy (inny dzień kalendarzowy, miesiąc lub rok)
+    const isNewDay = 
+      now.getFullYear() > lastClaimDate.getFullYear() ||
+      now.getMonth() > lastClaimDate.getMonth() ||
+      now.getDate() > lastClaimDate.getDate();
+
+    return isNewDay;
   },
 
   async setDailyClaimed(guildId, userId) {
@@ -418,7 +426,7 @@ module.exports = {
   },
 
   async removeLevelRole(guildId, level) {
-    await query('DELETE FROM level_roles WHERE guild_id = $1 AND level = $2', [guildId, level]);
+    await query('DELETE FROM level_roles WHERE guild_id = $1 AND level = $2', [level, guildId]);
   },
 
   async getLevelRoles(guildId) {
