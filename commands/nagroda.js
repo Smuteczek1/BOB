@@ -1,24 +1,23 @@
-const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
+const { SlashCommandBuilder, EmbedBuilder, MessageFlags } = require('discord.js');
 const db = require('../db');
 const { levelForXp } = require('../utils/leveling');
 const { syncLevelRole } = require('../utils/levelRoles');
 
 module.exports = {
   data: new SlashCommandBuilder()
-    .setName('daily')
-    .setDescription('Odbierz swoją dzienną nagrodę XP (reset o północy)!')
-    .setDMPermission(true), // Dostępne dla każdego użytkownika
+    .setName('nagroda') // <-- Zmiana komendy na /nagroda
+    .setDescription('Odbierz swoją dzienną nagrodę XP (reset o północy)!'),
 
   async execute(interaction) {
     const userId = interaction.user.id;
     const guildId = interaction.guild.id;
 
-    // 1. Sprawdzenie możliwości odbioru dzisiaj (kolejność: guildId, userId)
+    // 1. Sprawdzenie możliwości odbioru dzisiaj
     const canClaim = await db.canClaimDaily(guildId, userId);
     if (!canClaim) {
       await interaction.reply({
         content: '⏰ Odebrałeś/aś już dzisiejszą nagrodę! Wróć po północy (00:00).',
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       return;
     }
