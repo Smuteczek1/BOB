@@ -7,7 +7,7 @@ try {
 
 const fs = require('node:fs');
 const path = require('node:path');
-const { Client, Collection, GatewayIntentBits, Partials, MessageFlags } = require('discord.js');
+const { Client, Collection, GatewayIntentBits, Partials, MessageFlags, REST, Routes } = require('discord.js');
 const db = require('./db');
 const {
   BUTTON_CUSTOM_ID_PREFIX,
@@ -106,8 +106,17 @@ client.on('interactionCreate', async (interaction) => {
 // --- Start bota ---
 client.once('clientReady', async () => {
   console.log(`✅ Zalogowano jako ${client.user.tag}`);
+
+  // 1. Automatyczne odświeżenie i rejestracja komend Slash w API Discorda
+  await registerSlashCommands();
+
+  // 2. Porządkowanie kanałów tymczasowych
   await reconcileTempChannels();
 
+  // 3. Jednorazowe wstawienie domyślnego rekordu sesji głosowej (jeśli tabela jest pusta)
+  await seedInitialVoiceRecord();
+
+  // 4. Pętla XP za głosowe
   const scheduleVoiceTick = () => {
     const randomMinutes = Math.floor(Math.random() * (10 - 5 + 1)) + 5; // 5 - 10 min
     setTimeout(async () => {
@@ -117,6 +126,42 @@ client.once('clientReady', async () => {
   };
   scheduleVoiceTick();
 });
+
+// Funkcja rejestrująca komendy Slash w Discord API
+async function registerSlashCommands() {
+  try {
+    const commandsData = Array.from(client.commands.values()).map(c => c.data.toJSON());
+    const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
+
+    console.log('🔄 Rejestrowanie/Aktualizowanie komend Slash...');
+    
+    await rest.put(
+      Routes.applicationCommands(client.user.id),
+      { body: commandsData }
+    );
+
+    console.log('✅ Wszystkie komendy Slash (w tym /daily) zostały zarejestrowane!');
+  } catch (error) {
+    console.error('❌ Błąd podczas rejestracji komend Slash:', error);
+  }
+}
+
+// Funkcja dodająca jednorazowy rekord startowy do tabeli sesji głosowych
+async function seedInitialVoiceRecord() {
+  try {
+    const check = await db.raw.query('SELECT COUNT(*)::int as count FROM sessions');
+    if (check.rows[0].count === 0) {
+      const now = Date.now();
+      await db.raw.query(`
+        INSERT INTO sessions (guild_id, channel_id, creator_id, started_at, ended_at, duration_seconds)
+        VALUES ($1, $2, $3, $4, $5, $6)
+      `, ['0', '0', 'SYSTEM', now - 1000, now, 1]);
+      console.log('📌 Dodano początkowy rekord do tabeli sesji głosowych.');
+    }
+  } catch (err) {
+    console.error('❌ Nie udało się dodać rekordu do tabeli sesji:', err);
+  }
+}
 
 async function reconcileTempChannels() {
   const tempChannels = await db.getAllTempChannels();
