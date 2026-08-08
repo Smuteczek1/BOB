@@ -6,7 +6,8 @@ const { syncLevelRole } = require('../utils/levelRoles');
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('daily')
-    .setDescription('Odbierz swoją dzienną nagrodę XP (reset o północy)!'),
+    .setDescription('Odbierz swoją dzienną nagrodę XP (reset o północy)!')
+    .setDMPermission(true), // Dostępne dla każdego użytkownika
 
   async execute(interaction) {
     const userId = interaction.user.id;
