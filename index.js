@@ -20,12 +20,12 @@ const {
 } = require('./utils/suggestions');
 const { handleRoleButtonClick } = require('./utils/rolePanels');
 const {
-  RULE_EXPAND_PREFIX,
   RULE_PRIVATE_OPEN_ID,
   RULE_PRIVATE_EXPAND_PREFIX,
-  handleRuleExpandClick,
+  RULE_ACCEPT_ID,
   handleOpenPrivateView,
   handlePrivateExpandClick,
+  handleAcceptClick,
 } = require('./utils/verification');
 const {
   RULE_POINT_EDIT_SELECT_ID,
@@ -120,11 +120,6 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
 
-    if (interaction.isButton() && interaction.customId.startsWith(RULE_EXPAND_PREFIX)) {
-      await handleRuleExpandClick(interaction);
-      return;
-    }
-
     if (interaction.isButton() && interaction.customId === RULE_PRIVATE_OPEN_ID) {
       await handleOpenPrivateView(interaction);
       return;
@@ -132,6 +127,11 @@ client.on('interactionCreate', async (interaction) => {
 
     if (interaction.isButton() && interaction.customId.startsWith(RULE_PRIVATE_EXPAND_PREFIX)) {
       await handlePrivateExpandClick(interaction);
+      return;
+    }
+
+    if (interaction.isButton() && interaction.customId === RULE_ACCEPT_ID) {
+      await handleAcceptClick(interaction);
       return;
     }
 
