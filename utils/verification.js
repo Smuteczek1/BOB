@@ -1,74 +1,118 @@
-const {
-  EmbedBuilder,
-  ActionRowBuilder,
-  ButtonBuilder,
-  ButtonStyle,
-  MessageFlags,
-} = require('discord.js');
+const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, MessageFlags } = require('discord.js');
 const db = require('../db');
+const { parseEmojiInput } = require('./rolePanels');
 
-const VERIFY_BUTTON_PREFIX = 'verify_accept_';
+const RULE_EXPAND_PREFIX = 'rule_expand_';
 
 const DEFAULT_RULES_TEXT =
-  'Administracja nie ustawiła jeszcze treści regulaminu.\n' +
-  'Użyj `/setup-regulamin ustaw` z opcją `tresc`, aby ją dodać.';
+  'Administracja nie ustawiła jeszcze wstępu do regulaminu.\n' +
+  'Użyj `/setup-regulamin ustaw` z opcją `wstep`, aby go dodać.';
 
-function buildRulesEmbed(guild, config) {
+// Format akceptowany przez message.react()
+function formatEmojiForReact(raw) {
+  const parsed = parseEmojiInput(raw || '✅');
+  return parsed.id ? `${parsed.name}:${parsed.id}` : parsed.name;
+}
+
+function buildIntroEmbed(guild, config) {
   return new EmbedBuilder()
     .setColor(0x5865f2)
     .setTitle('📜 Regulamin serwera')
     .setDescription(config?.verify_rules_text || DEFAULT_RULES_TEXT)
-    .setThumbnail(guild.iconURL({ size: 256 }) ?? null)
-    .setFooter({ text: 'Kliknij przycisk poniżej, aby zaakceptować regulamin i uzyskać dostęp do serwera.' });
+    .setThumbnail(guild.iconURL({ size: 256 }) ?? null);
 }
 
-function buildVerifyButtonRow(guildId) {
+function buildRulePointEmbed(point, index, total) {
+  return new EmbedBuilder()
+    .setColor(0x5865f2)
+    .setTitle(`${index}. ${point.title}`)
+    .setDescription(point.summary)
+    .setFooter({ text: `Punkt regulaminu ${index}/${total}` });
+}
+
+// Zwraca ActionRow z przyciskiem "Rozwiń" TYLKO jeśli punkt ma dodatkowy opis - w przeciwnym
+// razie zwraca null, żeby nie pokazywać pustego/bezużytecznego przycisku.
+function buildRulePointButtonRow(point) {
+  if (!point.details) return null;
+
   const button = new ButtonBuilder()
-    .setCustomId(`${VERIFY_BUTTON_PREFIX}${guildId}`)
-    .setLabel('Akceptuję regulamin')
-    .setEmoji('✅')
-    .setStyle(ButtonStyle.Success);
+    .setCustomId(`${RULE_EXPAND_PREFIX}${point.id}`)
+    .setLabel('Rozwiń')
+    .setEmoji('🔽')
+    .setStyle(ButtonStyle.Secondary);
 
   return new ActionRowBuilder().addComponents(button);
 }
 
-// Obsługa kliknięcia przycisku "Akceptuję regulamin" - nadaje rolę weryfikacji
-// i (opcjonalnie) zdejmuje rolę startową, jeśli tak skonfigurowano w /rola-startowa.
-async function handleVerifyButtonClick(interaction) {
-  const guildId = interaction.guild.id;
-  const config = await db.getGuildConfig(guildId);
+function buildFinalVerifyEmbed(guild, config) {
+  const emoji = config?.verify_emoji || '✅';
+  return new EmbedBuilder()
+    .setColor(0x57f287)
+    .setTitle('Akceptacja regulaminu')
+    .setDescription(
+      `Przeczytałeś/aś powyższy regulamin?\n\n` +
+      `Zareaguj poniżej emotką ${emoji}, aby go zaakceptować i uzyskać dostęp do serwera.`
+    )
+    .setFooter({ text: 'Usunięcie reakcji NIE zabiera roli - to jednorazowa akceptacja.' });
+}
 
-  if (!config || !config.verify_role_id) {
+// Kliknięcie przycisku "Rozwiń" pod konkretnym punktem regulaminu - pokazuje pełną,
+// rozwiniętą treść tylko osobie, która kliknęła (ephemeral).
+async function handleRuleExpandClick(interaction) {
+  const id = interaction.customId.slice(RULE_EXPAND_PREFIX.length);
+  const point = await db.getRulePoint(id);
+
+  if (!point) {
     await interaction.reply({
-      content: '⚠️ Weryfikacja nie jest obecnie skonfigurowana na tym serwerze.',
+      content: '⚠️ Ten punkt regulaminu już nie istnieje (mógł zostać usunięty/edytowany).',
       flags: MessageFlags.Ephemeral,
     });
-    return true;
+    return;
   }
 
-  const member = interaction.member;
-  const role = await interaction.guild.roles.fetch(config.verify_role_id).catch(() => null);
+  const embed = new EmbedBuilder()
+    .setColor(0x5865f2)
+    .setTitle(`📖 ${point.title}`)
+    .setDescription(point.details || point.summary);
 
-  if (!role) {
-    await interaction.reply({
-      content: '⚠️ Rola weryfikacji już nie istnieje na serwerze - skontaktuj się z administracją.',
-      flags: MessageFlags.Ephemeral,
-    });
-    return true;
+  await interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
+}
+
+// Obsługa reakcji na wiadomości weryfikacyjnej - nadaje rolę i (opcjonalnie) zdejmuje
+// rolę startową, jeśli tak skonfigurowano w /rola-startowa.
+async function handleVerifyReaction(reaction, user) {
+  if (user.bot) return;
+
+  if (reaction.partial) {
+    reaction = await reaction.fetch().catch(() => null);
+    if (!reaction) return;
+  }
+  if (reaction.message.partial) {
+    await reaction.message.fetch().catch(() => null);
   }
 
-  if (member.roles.cache.has(role.id)) {
-    await interaction.reply({
-      content: '✅ Jesteś już zweryfikowany/a!',
-      flags: MessageFlags.Ephemeral,
-    });
-    return true;
-  }
+  const guild = reaction.message.guild;
+  if (!guild) return;
+
+  const config = await db.getGuildConfig(guild.id);
+  if (!config || !config.verify_message_id || reaction.message.id !== config.verify_message_id) return;
+  if (!config.verify_role_id) return;
+
+  const configuredEmoji = parseEmojiInput(config.verify_emoji || '✅');
+  const reactionKey = reaction.emoji.id ?? reaction.emoji.name;
+  if (reactionKey !== configuredEmoji.key) return;
+
+  const member = await guild.members.fetch(user.id).catch(() => null);
+  if (!member) return;
+
+  const role = await guild.roles.fetch(config.verify_role_id).catch(() => null);
+  if (!role) return;
+
+  if (member.roles.cache.has(role.id)) return; // już zweryfikowany/a
 
   try {
     await member.roles.add(role);
 
-    // Jeśli rola startowa ma być zastępowana przy weryfikacji - zdejmujemy ją
     if (
       config.starter_role_id &&
       config.starter_role_replace_on_verify &&
@@ -78,28 +122,19 @@ async function handleVerifyButtonClick(interaction) {
         console.error('Nie udało się zdjąć roli startowej po weryfikacji:', err)
       );
     }
-
-    await interaction.reply({
-      content: `✅ Zweryfikowano! Nadano rolę **${role.name}**. Witaj na serwerze! 🎉`,
-      flags: MessageFlags.Ephemeral,
-    });
   } catch (err) {
-    console.error('Błąd podczas nadawania roli przy weryfikacji:', err);
-    await interaction.reply({
-      content:
-        '❌ Nie udało się nadać roli. Upewnij się, że rola bota znajduje się **WYŻEJ** ' +
-        'w hierarchii serwera niż rola weryfikacji.',
-      flags: MessageFlags.Ephemeral,
-    });
+    console.error('Błąd podczas nadawania roli przy weryfikacji (reakcja):', err);
   }
-
-  return true;
 }
 
 module.exports = {
-  VERIFY_BUTTON_PREFIX,
+  RULE_EXPAND_PREFIX,
   DEFAULT_RULES_TEXT,
-  buildRulesEmbed,
-  buildVerifyButtonRow,
-  handleVerifyButtonClick,
+  formatEmojiForReact,
+  buildIntroEmbed,
+  buildRulePointEmbed,
+  buildRulePointButtonRow,
+  buildFinalVerifyEmbed,
+  handleRuleExpandClick,
+  handleVerifyReaction,
 };
