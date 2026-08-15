@@ -37,7 +37,7 @@ function buildAddModal() {
 
   const detailsInput = new TextInputBuilder()
     .setCustomId('details')
-    .setLabel('Rozwinięcie (po kliknięciu "Rozwiń") - opcjonalne')
+    .setLabel('Rozwinięcie (po "Rozwiń") - opcjonalne')
     .setStyle(TextInputStyle.Paragraph)
     .setMaxLength(1500)
     .setRequired(false);
