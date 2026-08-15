@@ -40,7 +40,7 @@ module.exports = {
       minXp = 151;
       maxXp = 300;
     } else if (roll < 0.99) {
-      tier = '🟣 Mityczna Skrzynia';
+      tier = '🟣 Epicka Skrzynia';
       color = 0x9b59b6;
       minXp = 301;
       maxXp = 500;
