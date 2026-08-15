@@ -23,11 +23,9 @@ const {
   RULE_EXPAND_PREFIX,
   RULE_PRIVATE_OPEN_ID,
   RULE_PRIVATE_EXPAND_PREFIX,
-  RULE_PRIVATE_BACK_ID,
   handleRuleExpandClick,
   handleOpenPrivateView,
   handlePrivateExpandClick,
-  handlePrivateBackClick,
 } = require('./utils/verification');
 const {
   RULE_POINT_EDIT_SELECT_ID,
@@ -134,11 +132,6 @@ client.on('interactionCreate', async (interaction) => {
 
     if (interaction.isButton() && interaction.customId.startsWith(RULE_PRIVATE_EXPAND_PREFIX)) {
       await handlePrivateExpandClick(interaction);
-      return;
-    }
-
-    if (interaction.isButton() && interaction.customId === RULE_PRIVATE_BACK_ID) {
-      await handlePrivateBackClick(interaction);
       return;
     }
 
