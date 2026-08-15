@@ -5,6 +5,7 @@ const {
   buildRulePointEmbed,
   buildRulePointButtonRow,
   buildFinalVerifyEmbed,
+  buildPrivateViewButtonRow,
   formatEmojiForReact,
 } = require('../utils/verification');
 
@@ -132,9 +133,10 @@ module.exports = {
         if (msg) await msg.delete().catch(() => null);
       }
 
-      // 1. Wstęp
+      // 1. Wstęp (z przyciskiem "Mój prywatny widok")
       const introEmbed = buildIntroEmbed(interaction.guild, config);
-      const introMessage = await channel.send({ embeds: [introEmbed] });
+      const introRow = buildPrivateViewButtonRow();
+      const introMessage = await channel.send({ embeds: [introEmbed], components: [introRow] });
 
       // 2. Punkty regulaminu - każdy jako osobna wiadomość
       for (let i = 0; i < points.length; i++) {
