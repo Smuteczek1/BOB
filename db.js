@@ -135,6 +135,18 @@ async function initDb() {
       ALTER TABLE user_levels ADD COLUMN IF NOT EXISTS last_daily_at BIGINT;
     `);
 
+    // Bezpieczne dodanie kolumn systemu powitań / pożegnań / roli startowej,
+    // jeśli tabela guild_config już istniała bez nich
+    await query(`
+      ALTER TABLE guild_config
+        ADD COLUMN IF NOT EXISTS welcome_channel_id TEXT,
+        ADD COLUMN IF NOT EXISTS welcome_message TEXT,
+        ADD COLUMN IF NOT EXISTS goodbye_channel_id TEXT,
+        ADD COLUMN IF NOT EXISTS goodbye_message TEXT,
+        ADD COLUMN IF NOT EXISTS starter_role_id TEXT,
+        ADD COLUMN IF NOT EXISTS starter_role_replace_on_verify BOOLEAN DEFAULT false;
+    `);
+
     console.log('✅ Baza danych Supabase (PostgreSQL) została pomyślnie zainicjalizowana.');
   } catch (err) {
     console.error('❌ Błąd podczas inicjalizacji bazy PostgreSQL:', err);
@@ -421,6 +433,64 @@ module.exports = {
       await query(`
         UPDATE user_levels SET last_daily_at = $1 WHERE guild_id = $2 AND user_id = $3
       `, [now, guildId, userId]);
+    }
+  },
+
+  // --- Powitania ---
+  async setWelcomeConfig(guildId, { channelId, message }) {
+    const existing = await this.getGuildConfig(guildId);
+    if (existing) {
+      await query(`
+        UPDATE guild_config
+        SET welcome_channel_id = $1,
+            welcome_message = $2
+        WHERE guild_id = $3
+      `, [channelId ?? null, message !== undefined ? message : existing.welcome_message, guildId]);
+    } else {
+      await query(`
+        INSERT INTO guild_config (guild_id, welcome_channel_id, welcome_message, created_at)
+        VALUES ($1, $2, $3, $4)
+      `, [guildId, channelId ?? null, message ?? null, Date.now()]);
+    }
+  },
+
+  // --- Pożegnania ---
+  async setGoodbyeConfig(guildId, { channelId, message }) {
+    const existing = await this.getGuildConfig(guildId);
+    if (existing) {
+      await query(`
+        UPDATE guild_config
+        SET goodbye_channel_id = $1,
+            goodbye_message = $2
+        WHERE guild_id = $3
+      `, [channelId ?? null, message !== undefined ? message : existing.goodbye_message, guildId]);
+    } else {
+      await query(`
+        INSERT INTO guild_config (guild_id, goodbye_channel_id, goodbye_message, created_at)
+        VALUES ($1, $2, $3, $4)
+      `, [guildId, channelId ?? null, message ?? null, Date.now()]);
+    }
+  },
+
+  // --- Rola startowa ---
+  async setStarterRoleConfig(guildId, { roleId, replaceOnVerify }) {
+    const existing = await this.getGuildConfig(guildId);
+    if (existing) {
+      await query(`
+        UPDATE guild_config
+        SET starter_role_id = $1,
+            starter_role_replace_on_verify = $2
+        WHERE guild_id = $3
+      `, [
+        roleId ?? null,
+        replaceOnVerify !== undefined ? replaceOnVerify : existing.starter_role_replace_on_verify,
+        guildId,
+      ]);
+    } else {
+      await query(`
+        INSERT INTO guild_config (guild_id, starter_role_id, starter_role_replace_on_verify, created_at)
+        VALUES ($1, $2, $3, $4)
+      `, [guildId, roleId ?? null, replaceOnVerify ?? false, Date.now()]);
     }
   },
 
