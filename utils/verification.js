@@ -13,7 +13,14 @@ const db = require('../db');
 
 const RULE_PRIVATE_OPEN_ID = 'rule_private_open';
 const RULE_PRIVATE_EXPAND_PREFIX = 'rule_private_expand_';
+const RULE_PRIVATE_PAGE_PREFIX = 'rule_private_page_';
 const RULE_ACCEPT_ID = 'rule_accept';
+
+// Ile punktów regulaminu pokazujemy na jednej "stronie" prywatnego widoku.
+// Discord (Components V2) pozwala na max 40 komponentów w jednej wiadomości,
+// a każdy punkt z "doprecyzowaniem" zajmuje kilka komponentów (Section + TextDisplay
+// + Button + Separator), więc trzeba dzielić długi regulamin na strony.
+const PAGE_SIZE = 5;
 
 // Flaga wymagana dla KAŻDEJ wiadomości używającej Components V2 (Container/Section/TextDisplay/...)
 const V2_FLAGS = MessageFlags.IsComponentsV2;
@@ -27,7 +34,7 @@ const DEFAULT_RULES_TEXT =
 const DEFAULT_BUTTON_LABEL = 'Sprawdź regulamin';
 const DEFAULT_INTRO_COMMENT = '-# Widok otworzy się tylko dla Ciebie — nikt inny go nie zobaczy.';
 
-// --- Okno 2: sekcja akceptacji na DOLE prywatnego widoku ---
+// --- Okno 2: sekcja akceptacji na DOLE prywatnego widoku (pokazywana na ostatniej stronie) ---
 const DEFAULT_ACCEPT_TITLE = 'Akceptacja regulaminu';
 const DEFAULT_ACCEPT_TEXT =
   'Przeczytałeś/aś wszystkie punkty powyżej? Kliknij przycisk poniżej, aby zaakceptować ' +
@@ -47,6 +54,14 @@ function getExpandedSet(messageId) {
   return expandedPointsByMessage.get(messageId);
 }
 
+// Trzyma stan "na której stronie regulaminu jest dana wiadomość".
+// Klucz: ID wiadomości -> numer strony (od 0). Tak samo jak wyżej — tylko stan UI.
+const pageByMessage = new Map();
+
+function getCurrentPage(messageId) {
+  return pageByMessage.get(messageId) ?? 0;
+}
+
 function memberHasVerifiedRole(member, config) {
   if (!member || !config?.verify_role_id) return false;
   return member.roles.cache.has(config.verify_role_id);
@@ -55,6 +70,7 @@ function memberHasVerifiedRole(member, config) {
 // --- Publiczna wiadomość: Tytuł -> Tekst -> [Przycisk] -> Komentarz ---
 function buildIntroContainer(guild, config) {
   const container = new ContainerBuilder().setAccentColor(0x5865f2);
+
   const title = config?.verify_rules_title || DEFAULT_RULES_TITLE;
   const description = config?.verify_rules_text || DEFAULT_RULES_TEXT;
   const buttonLabel = (config?.verify_button_label || DEFAULT_BUTTON_LABEL).slice(0, 80);
@@ -71,31 +87,50 @@ function buildIntroContainer(guild, config) {
     .setStyle(ButtonStyle.Primary);
 
   container.addActionRowComponents(new ActionRowBuilder().addComponents(button));
-
   container.addTextDisplayComponents(new TextDisplayBuilder().setContent(comment));
 
   return container;
 }
 
-// --- Prywatny widok (ephemeral): pełen regulamin w formie akordeonu + sekcja akceptacji na dole.
-// Rozwinięte punkty (ID w `expandedIds`) pokazują doprecyzowanie TUŻ POD swoim podsumowaniem,
-// reszta listy zostaje bez zmian. Sekcja akceptacji: Tytuł -> Tekst -> [Przycisk] -> Komentarz.
-function buildRegulaminContainer(guild, points, config, expandedIds = new Set(), alreadyVerified = false) {
+// --- Prywatny widok (ephemeral): regulamin podzielony na strony (akordeon na punkty)
+// + sekcja akceptacji na dole OSTATNIEJ strony. Rozwinięte punkty (ID w `expandedIds`)
+// pokazują doprecyzowanie TUŻ POD swoim podsumowaniem, reszta listy zostaje bez zmian.
+function buildRegulaminContainer(
+  guild,
+  points,
+  config,
+  expandedIds = new Set(),
+  alreadyVerified = false,
+  page = 0,
+) {
   const container = new ContainerBuilder().setAccentColor(0x5865f2);
+
+  const totalPages = Math.max(1, Math.ceil(points.length / PAGE_SIZE));
+  const safePage = Math.min(Math.max(0, page), totalPages - 1);
+
   const title = config?.verify_rules_title || DEFAULT_RULES_TITLE;
   const description = config?.verify_rules_text || DEFAULT_RULES_TEXT;
 
   container.addTextDisplayComponents(
-    new TextDisplayBuilder().setContent(`## ${title}`),
-    new TextDisplayBuilder().setContent(description),
+    new TextDisplayBuilder().setContent(
+      `## ${title}${totalPages > 1 ? ` (strona ${safePage + 1}/${totalPages})` : ''}`,
+    ),
   );
+
+  // Opis regulaminu pokazujemy tylko na pierwszej stronie, żeby oszczędzić komponenty.
+  if (safePage === 0) {
+    container.addTextDisplayComponents(new TextDisplayBuilder().setContent(description));
+  }
 
   container.addSeparatorComponents(new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small));
 
-  points.forEach((p, i) => {
-    const isExpanded = expandedIds.has(String(p.id));
-    let content = `### ${i + 1}. ${p.title}\n${p.summary}`;
+  const startIndex = safePage * PAGE_SIZE;
+  const pagePoints = points.slice(startIndex, startIndex + PAGE_SIZE);
 
+  pagePoints.forEach((p, i) => {
+    const globalIndex = startIndex + i;
+    const isExpanded = expandedIds.has(String(p.id));
+    let content = `### ${globalIndex + 1}. ${p.title}\n${p.summary}`;
     if (isExpanded && p.details) {
       content += `\n\n> 📖 **Doprecyzowanie:**\n> ${p.details.replaceAll('\n', '\n> ')}`;
     }
@@ -116,36 +151,55 @@ function buildRegulaminContainer(guild, points, config, expandedIds = new Set(),
       container.addTextDisplayComponents(textDisplay);
     }
 
-    if (i < points.length - 1) {
+    if (i < pagePoints.length - 1) {
       container.addSeparatorComponents(new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small));
     }
   });
 
   container.addSeparatorComponents(new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Large));
 
-  // --- Sekcja akceptacji ---
-  const acceptTitle = config?.verify_accept_title || DEFAULT_ACCEPT_TITLE;
-  const acceptText = config?.verify_accept_text || DEFAULT_ACCEPT_TEXT;
-  const acceptButtonLabel = (config?.verify_accept_button_label || DEFAULT_ACCEPT_BUTTON_LABEL).slice(0, 80);
-  const acceptComment = config?.verify_accept_comment || DEFAULT_ACCEPT_COMMENT;
+  // --- Nawigacja stron (tylko jeśli jest więcej niż jedna strona) ---
+  if (totalPages > 1) {
+    const prevButton = new ButtonBuilder()
+      .setCustomId(`${RULE_PRIVATE_PAGE_PREFIX}${safePage - 1}`)
+      .setLabel('◀ Poprzednia')
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(safePage === 0);
 
-  container.addTextDisplayComponents(
-    new TextDisplayBuilder().setContent(`### ${acceptTitle}`),
-    new TextDisplayBuilder().setContent(acceptText),
-  );
+    const nextButton = new ButtonBuilder()
+      .setCustomId(`${RULE_PRIVATE_PAGE_PREFIX}${safePage + 1}`)
+      .setLabel('Następna ▶')
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(safePage === totalPages - 1);
 
-  if (alreadyVerified) {
+    container.addActionRowComponents(new ActionRowBuilder().addComponents(prevButton, nextButton));
+  }
+
+  // --- Sekcja akceptacji: tylko na ostatniej stronie ---
+  if (safePage === totalPages - 1) {
+    const acceptTitle = config?.verify_accept_title || DEFAULT_ACCEPT_TITLE;
+    const acceptText = config?.verify_accept_text || DEFAULT_ACCEPT_TEXT;
+    const acceptButtonLabel = (config?.verify_accept_button_label || DEFAULT_ACCEPT_BUTTON_LABEL).slice(0, 80);
+    const acceptComment = config?.verify_accept_comment || DEFAULT_ACCEPT_COMMENT;
+
     container.addTextDisplayComponents(
-      new TextDisplayBuilder().setContent('-# ✅ Regulamin zaakceptowany — masz już dostęp do serwera.'),
+      new TextDisplayBuilder().setContent(`### ${acceptTitle}`),
+      new TextDisplayBuilder().setContent(acceptText),
     );
-  } else {
-    const acceptButton = new ButtonBuilder()
-      .setCustomId(RULE_ACCEPT_ID)
-      .setLabel(acceptButtonLabel)
-      .setStyle(ButtonStyle.Success);
 
-    container.addActionRowComponents(new ActionRowBuilder().addComponents(acceptButton));
-    container.addTextDisplayComponents(new TextDisplayBuilder().setContent(acceptComment));
+    if (alreadyVerified) {
+      container.addTextDisplayComponents(
+        new TextDisplayBuilder().setContent('-# ✅ Regulamin zaakceptowany — masz już dostęp do serwera.'),
+      );
+    } else {
+      const acceptButton = new ButtonBuilder()
+        .setCustomId(RULE_ACCEPT_ID)
+        .setLabel(acceptButtonLabel)
+        .setStyle(ButtonStyle.Success);
+
+      container.addActionRowComponents(new ActionRowBuilder().addComponents(acceptButton));
+      container.addTextDisplayComponents(new TextDisplayBuilder().setContent(acceptComment));
+    }
   }
 
   return container;
@@ -163,7 +217,7 @@ async function handleOpenPrivateView(interaction) {
   }
 
   const alreadyVerified = memberHasVerifiedRole(interaction.member, config);
-  const container = buildRegulaminContainer(interaction.guild, points, config, new Set(), alreadyVerified);
+  const container = buildRegulaminContainer(interaction.guild, points, config, new Set(), alreadyVerified, 0);
 
   await interaction.reply({
     components: [container],
@@ -178,8 +232,9 @@ async function handlePrivateExpandClick(interaction) {
   const guildId = interaction.guild.id;
   const config = await db.getGuildConfig(guildId);
   const points = await db.getRulePoints(guildId);
-
   const expanded = getExpandedSet(interaction.message.id);
+  const page = getCurrentPage(interaction.message.id);
+
   if (expanded.has(id)) {
     expanded.delete(id);
   } else {
@@ -187,7 +242,26 @@ async function handlePrivateExpandClick(interaction) {
   }
 
   const alreadyVerified = memberHasVerifiedRole(interaction.member, config);
-  const container = buildRegulaminContainer(interaction.guild, points, config, expanded, alreadyVerified);
+  const container = buildRegulaminContainer(interaction.guild, points, config, expanded, alreadyVerified, page);
+
+  await interaction.update({ components: [container], flags: V2_FLAGS });
+}
+
+// Kliknięcie "Poprzednia"/"Następna" - zmienia stronę widoku, edytując tę samą wiadomość.
+async function handlePrivatePageChange(interaction) {
+  const requestedPage = parseInt(interaction.customId.slice(RULE_PRIVATE_PAGE_PREFIX.length), 10);
+  const guildId = interaction.guild.id;
+  const config = await db.getGuildConfig(guildId);
+  const points = await db.getRulePoints(guildId);
+  const expanded = getExpandedSet(interaction.message.id);
+
+  const totalPages = Math.max(1, Math.ceil(points.length / PAGE_SIZE));
+  const safePage = Math.min(Math.max(0, Number.isNaN(requestedPage) ? 0 : requestedPage), totalPages - 1);
+  pageByMessage.set(interaction.message.id, safePage);
+
+  const alreadyVerified = memberHasVerifiedRole(interaction.member, config);
+  const container = buildRegulaminContainer(interaction.guild, points, config, expanded, alreadyVerified, safePage);
+
   await interaction.update({ components: [container], flags: V2_FLAGS });
 }
 
@@ -218,7 +292,6 @@ async function handleAcceptClick(interaction) {
   if (!member.roles.cache.has(role.id)) {
     try {
       await member.roles.add(role);
-
       if (
         config.starter_role_id &&
         config.starter_role_replace_on_verify &&
@@ -242,15 +315,19 @@ async function handleAcceptClick(interaction) {
 
   const points = await db.getRulePoints(guildId);
   const expanded = getExpandedSet(interaction.message.id);
-  const container = buildRegulaminContainer(interaction.guild, points, config, expanded, true);
+  const page = getCurrentPage(interaction.message.id);
+  const container = buildRegulaminContainer(interaction.guild, points, config, expanded, true, page);
+
   await interaction.update({ components: [container], flags: V2_FLAGS });
 }
 
 module.exports = {
   RULE_PRIVATE_OPEN_ID,
   RULE_PRIVATE_EXPAND_PREFIX,
+  RULE_PRIVATE_PAGE_PREFIX,
   RULE_ACCEPT_ID,
   V2_FLAGS,
+  PAGE_SIZE,
   DEFAULT_RULES_TITLE,
   DEFAULT_RULES_TEXT,
   DEFAULT_BUTTON_LABEL,
@@ -263,5 +340,6 @@ module.exports = {
   buildRegulaminContainer,
   handleOpenPrivateView,
   handlePrivateExpandClick,
+  handlePrivatePageChange,
   handleAcceptClick,
 };
