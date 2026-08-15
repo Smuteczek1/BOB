@@ -162,6 +162,8 @@ async function initDb() {
         ADD COLUMN IF NOT EXISTS verify_message_id TEXT,
         ADD COLUMN IF NOT EXISTS verify_role_id TEXT,
         ADD COLUMN IF NOT EXISTS verify_rules_text TEXT,
+        ADD COLUMN IF NOT EXISTS verify_rules_title TEXT,
+        ADD COLUMN IF NOT EXISTS verify_button_label TEXT,
         ADD COLUMN IF NOT EXISTS verify_emoji TEXT,
         ADD COLUMN IF NOT EXISTS verify_intro_message_id TEXT;
     `);
@@ -514,7 +516,7 @@ module.exports = {
   },
 
   // --- Regulamin / weryfikacja ---
-  async setVerificationConfig(guildId, { channelId, roleId, rulesText, emoji }) {
+  async setVerificationConfig(guildId, { channelId, roleId, rulesText, rulesTitle, buttonLabel, emoji }) {
     const existing = await this.getGuildConfig(guildId);
     if (existing) {
       await query(`
@@ -522,20 +524,34 @@ module.exports = {
         SET verify_channel_id = $1,
             verify_role_id = $2,
             verify_rules_text = $3,
-            verify_emoji = $4
-        WHERE guild_id = $5
+            verify_rules_title = $4,
+            verify_button_label = $5,
+            verify_emoji = $6
+        WHERE guild_id = $7
       `, [
         channelId ?? null,
         roleId ?? null,
         rulesText !== undefined ? rulesText : existing.verify_rules_text,
+        rulesTitle !== undefined ? rulesTitle : existing.verify_rules_title,
+        buttonLabel !== undefined ? buttonLabel : existing.verify_button_label,
         emoji !== undefined ? emoji : existing.verify_emoji,
         guildId,
       ]);
     } else {
       await query(`
-        INSERT INTO guild_config (guild_id, verify_channel_id, verify_role_id, verify_rules_text, verify_emoji, created_at)
-        VALUES ($1, $2, $3, $4, $5, $6)
-      `, [guildId, channelId ?? null, roleId ?? null, rulesText ?? null, emoji ?? null, Date.now()]);
+        INSERT INTO guild_config
+          (guild_id, verify_channel_id, verify_role_id, verify_rules_text, verify_rules_title, verify_button_label, verify_emoji, created_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      `, [
+        guildId,
+        channelId ?? null,
+        roleId ?? null,
+        rulesText ?? null,
+        rulesTitle ?? null,
+        buttonLabel ?? null,
+        emoji ?? null,
+        Date.now(),
+      ]);
     }
   },
 
