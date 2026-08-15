@@ -1,5 +1,18 @@
 const { Pool } = require('pg');
 
+// Zwraca datę kalendarzową (YYYY-MM-DD) wg czasu polskiego, niezależnie
+// od strefy czasowej ustawionej na serwerze hostującym bota.
+function getWarsawDateString(timestamp) {
+  const date = timestamp ? new Date(Number(timestamp)) : new Date();
+  const formatter = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Europe/Warsaw',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  });
+  return formatter.format(date); // np. "2026-08-15"
+}
+
 // Utworzenie puli połączeń do bazy PostgreSQL/Supabase
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -388,17 +401,11 @@ module.exports = {
   async canClaimDaily(guildId, userId) {
     const row = await this.getUserLevel(guildId, userId);
     if (!row || !row.last_daily_at) return true;
-
-    const lastClaimDate = new Date(Number(row.last_daily_at));
-    const now = new Date();
-
-    // Reset następuje o północy (inny dzień kalendarzowy, miesiąc lub rok)
-    const isNewDay = 
-      now.getFullYear() > lastClaimDate.getFullYear() ||
-      now.getMonth() > lastClaimDate.getMonth() ||
-      now.getDate() > lastClaimDate.getDate();
-
-    return isNewDay;
+  
+    const todayWarsaw = getWarsawDateString();
+    const lastClaimWarsaw = getWarsawDateString(row.last_daily_at);
+  
+    return todayWarsaw !== lastClaimWarsaw;
   },
 
   async setDailyClaimed(guildId, userId) {
