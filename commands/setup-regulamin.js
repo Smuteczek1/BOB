@@ -30,8 +30,16 @@ module.exports = {
         .setDescription('Emotka do weryfikacji (domyślnie ✅). Możesz wkleić emotkę z serwera.')
         .setRequired(false))
       .addStringOption(opt => opt
+        .setName('tytul')
+        .setDescription('Własny tytuł regulaminu (domyślnie "📜 Regulamin serwera"). Opcjonalne.')
+        .setRequired(false))
+      .addStringOption(opt => opt
         .setName('wstep')
-        .setDescription('Tekst wstępu przed listą punktów (użyj \\n dla nowej linii). Opcjonalne.')
+        .setDescription('Tekst wstępu/opisu przed listą punktów (użyj \\n dla nowej linii). Opcjonalne.')
+        .setRequired(false))
+      .addStringOption(opt => opt
+        .setName('przycisk')
+        .setDescription('Etykieta przycisku otwierającego regulamin (domyślnie "Sprawdź regulamin"). Opcjonalne.')
         .setRequired(false)))
     .addSubcommand(sub => sub
       .setName('publikuj')
@@ -51,6 +59,8 @@ module.exports = {
       const channel = interaction.options.getChannel('kanal');
       const role = interaction.options.getRole('rola');
       const emoji = interaction.options.getString('emotka');
+      const tytul = interaction.options.getString('tytul') ?? undefined;
+      const przycisk = interaction.options.getString('przycisk') ?? undefined;
       const rawWstep = interaction.options.getString('wstep');
       const wstep = rawWstep ? rawWstep.replaceAll('\\n', '\n') : undefined;
 
@@ -77,6 +87,8 @@ module.exports = {
         channelId: channel.id,
         roleId: role.id,
         rulesText: wstep,
+        rulesTitle: tytul,
+        buttonLabel: przycisk,
         emoji: emoji ?? undefined,
       });
 
@@ -85,8 +97,10 @@ module.exports = {
           `✅ Skonfigurowano regulamin!\n` +
           `📍 Kanał: <#${channel.id}>\n` +
           `🎭 Rola po weryfikacji: <@&${role.id}>\n` +
-          `${emoji || '✅'} Emotka weryfikująca: ${emoji || '✅'}\n\n` +
-          `Teraz dodaj punkty regulaminu przez \`/regulamin-punkt dodaj\`, a na końcu użyj \`/setup-regulamin publikuj\`.`,
+          `${emoji || '✅'} Emotka weryfikująca: ${emoji || '✅'}\n` +
+          (tytul ? `📝 Tytuł: ${tytul}\n` : '') +
+          (przycisk ? `🔘 Etykieta przycisku: ${przycisk}\n` : '') +
+          `\nTeraz dodaj punkty regulaminu przez \`/regulamin-punkt dodaj\`, a na końcu użyj \`/setup-regulamin publikuj\`.`,
         flags: MessageFlags.Ephemeral,
       });
       return;
