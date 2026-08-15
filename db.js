@@ -144,7 +144,11 @@ async function initDb() {
         ADD COLUMN IF NOT EXISTS goodbye_channel_id TEXT,
         ADD COLUMN IF NOT EXISTS goodbye_message TEXT,
         ADD COLUMN IF NOT EXISTS starter_role_id TEXT,
-        ADD COLUMN IF NOT EXISTS starter_role_replace_on_verify BOOLEAN DEFAULT false;
+        ADD COLUMN IF NOT EXISTS starter_role_replace_on_verify BOOLEAN DEFAULT false,
+        ADD COLUMN IF NOT EXISTS verify_channel_id TEXT,
+        ADD COLUMN IF NOT EXISTS verify_message_id TEXT,
+        ADD COLUMN IF NOT EXISTS verify_role_id TEXT,
+        ADD COLUMN IF NOT EXISTS verify_rules_text TEXT;
     `);
 
     console.log('✅ Baza danych Supabase (PostgreSQL) została pomyślnie zainicjalizowana.');
@@ -492,6 +496,34 @@ module.exports = {
         VALUES ($1, $2, $3, $4)
       `, [guildId, roleId ?? null, replaceOnVerify ?? false, Date.now()]);
     }
+  },
+
+  // --- Regulamin / weryfikacja ---
+  async setVerificationConfig(guildId, { channelId, roleId, rulesText }) {
+    const existing = await this.getGuildConfig(guildId);
+    if (existing) {
+      await query(`
+        UPDATE guild_config
+        SET verify_channel_id = $1,
+            verify_role_id = $2,
+            verify_rules_text = $3
+        WHERE guild_id = $4
+      `, [
+        channelId ?? null,
+        roleId ?? null,
+        rulesText !== undefined ? rulesText : existing.verify_rules_text,
+        guildId,
+      ]);
+    } else {
+      await query(`
+        INSERT INTO guild_config (guild_id, verify_channel_id, verify_role_id, verify_rules_text, created_at)
+        VALUES ($1, $2, $3, $4, $5)
+      `, [guildId, channelId ?? null, roleId ?? null, rulesText ?? null, Date.now()]);
+    }
+  },
+
+  async setVerificationMessageId(guildId, messageId) {
+    await query('UPDATE guild_config SET verify_message_id = $1 WHERE guild_id = $2', [messageId, guildId]);
   },
 
   // --- Drabinka ról za poziomy ---
