@@ -164,6 +164,11 @@ async function initDb() {
         ADD COLUMN IF NOT EXISTS verify_rules_text TEXT,
         ADD COLUMN IF NOT EXISTS verify_rules_title TEXT,
         ADD COLUMN IF NOT EXISTS verify_button_label TEXT,
+        ADD COLUMN IF NOT EXISTS verify_intro_comment TEXT,
+        ADD COLUMN IF NOT EXISTS verify_accept_title TEXT,
+        ADD COLUMN IF NOT EXISTS verify_accept_text TEXT,
+        ADD COLUMN IF NOT EXISTS verify_accept_button_label TEXT,
+        ADD COLUMN IF NOT EXISTS verify_accept_comment TEXT,
         ADD COLUMN IF NOT EXISTS verify_emoji TEXT,
         ADD COLUMN IF NOT EXISTS verify_intro_message_id TEXT;
     `);
@@ -516,8 +521,13 @@ module.exports = {
   },
 
   // --- Regulamin / weryfikacja ---
-  async setVerificationConfig(guildId, { channelId, roleId, rulesText, rulesTitle, buttonLabel, emoji }) {
+  async setVerificationConfig(guildId, {
+    channelId, roleId, rulesText, rulesTitle, buttonLabel, introComment,
+    acceptTitle, acceptText, acceptButtonLabel, acceptComment,
+  }) {
     const existing = await this.getGuildConfig(guildId);
+    const pick = (val, fallback) => (val !== undefined ? val : fallback);
+
     if (existing) {
       await query(`
         UPDATE guild_config
@@ -526,22 +536,32 @@ module.exports = {
             verify_rules_text = $3,
             verify_rules_title = $4,
             verify_button_label = $5,
-            verify_emoji = $6
-        WHERE guild_id = $7
+            verify_intro_comment = $6,
+            verify_accept_title = $7,
+            verify_accept_text = $8,
+            verify_accept_button_label = $9,
+            verify_accept_comment = $10
+        WHERE guild_id = $11
       `, [
         channelId ?? null,
         roleId ?? null,
-        rulesText !== undefined ? rulesText : existing.verify_rules_text,
-        rulesTitle !== undefined ? rulesTitle : existing.verify_rules_title,
-        buttonLabel !== undefined ? buttonLabel : existing.verify_button_label,
-        emoji !== undefined ? emoji : existing.verify_emoji,
+        pick(rulesText, existing.verify_rules_text),
+        pick(rulesTitle, existing.verify_rules_title),
+        pick(buttonLabel, existing.verify_button_label),
+        pick(introComment, existing.verify_intro_comment),
+        pick(acceptTitle, existing.verify_accept_title),
+        pick(acceptText, existing.verify_accept_text),
+        pick(acceptButtonLabel, existing.verify_accept_button_label),
+        pick(acceptComment, existing.verify_accept_comment),
         guildId,
       ]);
     } else {
       await query(`
         INSERT INTO guild_config
-          (guild_id, verify_channel_id, verify_role_id, verify_rules_text, verify_rules_title, verify_button_label, verify_emoji, created_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+          (guild_id, verify_channel_id, verify_role_id, verify_rules_text, verify_rules_title,
+           verify_button_label, verify_intro_comment, verify_accept_title, verify_accept_text,
+           verify_accept_button_label, verify_accept_comment, created_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
       `, [
         guildId,
         channelId ?? null,
@@ -549,7 +569,11 @@ module.exports = {
         rulesText ?? null,
         rulesTitle ?? null,
         buttonLabel ?? null,
-        emoji ?? null,
+        introComment ?? null,
+        acceptTitle ?? null,
+        acceptText ?? null,
+        acceptButtonLabel ?? null,
+        acceptComment ?? null,
         Date.now(),
       ]);
     }
