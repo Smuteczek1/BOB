@@ -1,8 +1,18 @@
-const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, MessageFlags } = require('discord.js');
+const {
+  EmbedBuilder,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  StringSelectMenuBuilder,
+  StringSelectMenuOptionBuilder,
+  MessageFlags,
+} = require('discord.js');
 const db = require('../db');
 const { parseEmojiInput } = require('./rolePanels');
 
 const RULE_EXPAND_PREFIX = 'rule_expand_';
+const RULE_PRIVATE_OPEN_ID = 'rule_private_open';
+const RULE_PRIVATE_SELECT_ID = 'rule_private_select';
 
 const DEFAULT_RULES_TEXT =
   'Administracja nie ustawiła jeszcze wstępu do regulaminu.\n' +
@@ -54,6 +64,109 @@ function buildFinalVerifyEmbed(guild, config) {
       `Zareaguj poniżej emotką ${emoji}, aby go zaakceptować i uzyskać dostęp do serwera.`
     )
     .setFooter({ text: 'Usunięcie reakcji NIE zabiera roli - to jednorazowa akceptacja.' });
+}
+
+// Przycisk "Mój prywatny widok" - wysyłany na wiadomości ze wstępem regulaminu
+function buildPrivateViewButtonRow() {
+  const button = new ButtonBuilder()
+    .setCustomId(RULE_PRIVATE_OPEN_ID)
+    .setLabel('Mój prywatny widok')
+    .setEmoji('🔒')
+    .setStyle(ButtonStyle.Primary);
+
+  return new ActionRowBuilder().addComponents(button);
+}
+
+// Skrócona lista wszystkich punktów naraz - widok domyślny prywatnego podglądu
+function buildPrivateListEmbed(guild, points, config) {
+  return new EmbedBuilder()
+    .setColor(0x5865f2)
+    .setTitle('📜 Regulamin serwera — Twój prywatny podgląd')
+    .setDescription(
+      (config?.verify_rules_text ? `${config.verify_rules_text}\n\n` : '') +
+      points.map((p, i) => `**${i + 1}. ${p.title}**\n${p.summary}`).join('\n\n')
+    )
+    .setThumbnail(guild.iconURL({ size: 256 }) ?? null)
+    .setFooter({ text: 'Wybierz punkt z listy poniżej, aby zobaczyć jego pełne rozwinięcie.' });
+}
+
+// Select menu do wyboru punktu w prywatnym widoku - wybór EDYTUJE tę samą wiadomość
+// (interaction.update()), zamiast tworzyć nowe efemeryczne odpowiedzi.
+function buildPrivateSelectRow(points, selectedId) {
+  const options = [
+    new StringSelectMenuOptionBuilder()
+      .setLabel('📋 Pokaż pełną listę')
+      .setValue('ALL')
+      .setDefault(selectedId === null),
+    ...points.slice(0, 24).map((p, idx) =>
+      new StringSelectMenuOptionBuilder()
+        .setLabel(`${idx + 1}. ${p.title}`.slice(0, 100))
+        .setValue(String(p.id))
+        .setDefault(String(p.id) === selectedId),
+    ),
+  ];
+
+  const select = new StringSelectMenuBuilder()
+    .setCustomId(RULE_PRIVATE_SELECT_ID)
+    .setPlaceholder('Wybierz punkt do rozwinięcia...')
+    .addOptions(options);
+
+  return new ActionRowBuilder().addComponents(select);
+}
+
+// Kliknięcie "Mój prywatny widok" - pierwsza (i jedyna) odpowiedź, ephemeral.
+async function handleOpenPrivateView(interaction) {
+  const guildId = interaction.guild.id;
+  const config = await db.getGuildConfig(guildId);
+  const points = await db.getRulePoints(guildId);
+
+  if (!points || points.length === 0) {
+    await interaction.reply({
+      content: 'ℹ️ Regulamin nie ma jeszcze żadnych punktów.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const embed = buildPrivateListEmbed(interaction.guild, points, config);
+  const row = buildPrivateSelectRow(points, null);
+
+  await interaction.reply({ embeds: [embed], components: [row], flags: MessageFlags.Ephemeral });
+}
+
+// Wybór punktu z select menu w prywatnym widoku - EDYTUJE istniejącą wiadomość zamiast
+// wysyłać nową, żeby nie zaśmiecać czatu kolejnymi odpowiedziami.
+async function handlePrivateSelect(interaction) {
+  const guildId = interaction.guild.id;
+  const points = await db.getRulePoints(guildId);
+  const value = interaction.values[0];
+
+  if (value === 'ALL') {
+    const config = await db.getGuildConfig(guildId);
+    const embed = buildPrivateListEmbed(interaction.guild, points, config);
+    const row = buildPrivateSelectRow(points, null);
+    await interaction.update({ embeds: [embed], components: [row] });
+    return;
+  }
+
+  const point = points.find(p => String(p.id) === value);
+  const row = buildPrivateSelectRow(points, value);
+
+  if (!point) {
+    await interaction.update({
+      content: '⚠️ Ten punkt już nie istnieje (mógł zostać usunięty).',
+      embeds: [],
+      components: [row],
+    });
+    return;
+  }
+
+  const embed = new EmbedBuilder()
+    .setColor(0x5865f2)
+    .setTitle(`📖 ${point.title}`)
+    .setDescription(point.details || point.summary);
+
+  await interaction.update({ content: null, embeds: [embed], components: [row] });
 }
 
 // Kliknięcie przycisku "Rozwiń" pod konkretnym punktem regulaminu - pokazuje pełną,
@@ -129,12 +242,19 @@ async function handleVerifyReaction(reaction, user) {
 
 module.exports = {
   RULE_EXPAND_PREFIX,
+  RULE_PRIVATE_OPEN_ID,
+  RULE_PRIVATE_SELECT_ID,
   DEFAULT_RULES_TEXT,
   formatEmojiForReact,
   buildIntroEmbed,
   buildRulePointEmbed,
   buildRulePointButtonRow,
   buildFinalVerifyEmbed,
+  buildPrivateViewButtonRow,
+  buildPrivateListEmbed,
+  buildPrivateSelectRow,
+  handleOpenPrivateView,
+  handlePrivateSelect,
   handleRuleExpandClick,
   handleVerifyReaction,
 };
