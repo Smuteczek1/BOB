@@ -128,6 +128,19 @@ async function initDb() {
 
       CREATE INDEX IF NOT EXISTS idx_suggestion_boards_guild ON suggestion_boards(guild_id);
       CREATE INDEX IF NOT EXISTS idx_suggestion_boards_create_channel ON suggestion_boards(create_channel_id);
+
+      CREATE TABLE IF NOT EXISTS rule_points (
+        id SERIAL PRIMARY KEY,
+        guild_id TEXT NOT NULL,
+        position INT NOT NULL DEFAULT 0,
+        title TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        details TEXT,
+        message_id TEXT,
+        created_at BIGINT
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_rule_points_guild ON rule_points(guild_id);
     `);
 
     // Bezpieczne dodanie kolumny last_daily_at, jeśli tabela user_levels już istniała bez niej
@@ -148,7 +161,9 @@ async function initDb() {
         ADD COLUMN IF NOT EXISTS verify_channel_id TEXT,
         ADD COLUMN IF NOT EXISTS verify_message_id TEXT,
         ADD COLUMN IF NOT EXISTS verify_role_id TEXT,
-        ADD COLUMN IF NOT EXISTS verify_rules_text TEXT;
+        ADD COLUMN IF NOT EXISTS verify_rules_text TEXT,
+        ADD COLUMN IF NOT EXISTS verify_emoji TEXT,
+        ADD COLUMN IF NOT EXISTS verify_intro_message_id TEXT;
     `);
 
     console.log('✅ Baza danych Supabase (PostgreSQL) została pomyślnie zainicjalizowana.');
@@ -499,31 +514,106 @@ module.exports = {
   },
 
   // --- Regulamin / weryfikacja ---
-  async setVerificationConfig(guildId, { channelId, roleId, rulesText }) {
+  async setVerificationConfig(guildId, { channelId, roleId, rulesText, emoji }) {
     const existing = await this.getGuildConfig(guildId);
     if (existing) {
       await query(`
         UPDATE guild_config
         SET verify_channel_id = $1,
             verify_role_id = $2,
-            verify_rules_text = $3
-        WHERE guild_id = $4
+            verify_rules_text = $3,
+            verify_emoji = $4
+        WHERE guild_id = $5
       `, [
         channelId ?? null,
         roleId ?? null,
         rulesText !== undefined ? rulesText : existing.verify_rules_text,
+        emoji !== undefined ? emoji : existing.verify_emoji,
         guildId,
       ]);
     } else {
       await query(`
-        INSERT INTO guild_config (guild_id, verify_channel_id, verify_role_id, verify_rules_text, created_at)
-        VALUES ($1, $2, $3, $4, $5)
-      `, [guildId, channelId ?? null, roleId ?? null, rulesText ?? null, Date.now()]);
+        INSERT INTO guild_config (guild_id, verify_channel_id, verify_role_id, verify_rules_text, verify_emoji, created_at)
+        VALUES ($1, $2, $3, $4, $5, $6)
+      `, [guildId, channelId ?? null, roleId ?? null, rulesText ?? null, emoji ?? null, Date.now()]);
     }
   },
 
   async setVerificationMessageId(guildId, messageId) {
     await query('UPDATE guild_config SET verify_message_id = $1 WHERE guild_id = $2', [messageId, guildId]);
+  },
+
+  async setVerificationMessageIds(guildId, { introMessageId, verifyMessageId }) {
+    const existing = await this.getGuildConfig(guildId);
+    await query(`
+      UPDATE guild_config
+      SET verify_intro_message_id = $1,
+          verify_message_id = $2
+      WHERE guild_id = $3
+    `, [
+      introMessageId !== undefined ? introMessageId : existing?.verify_intro_message_id,
+      verifyMessageId !== undefined ? verifyMessageId : existing?.verify_message_id,
+      guildId,
+    ]);
+  },
+
+  // --- Punkty regulaminu ---
+  async addRulePoint(guildId, { title, summary, details }) {
+    const countRow = await queryOne('SELECT COUNT(*)::int as c FROM rule_points WHERE guild_id = $1', [guildId]);
+    const position = countRow ? countRow.c : 0;
+    return await queryOne(`
+      INSERT INTO rule_points (guild_id, position, title, summary, details, created_at)
+      VALUES ($1, $2, $3, $4, $5, $6)
+      RETURNING *
+    `, [guildId, position, title, summary, details ?? null, Date.now()]);
+  },
+
+  async getRulePoints(guildId) {
+    return await queryMany('SELECT * FROM rule_points WHERE guild_id = $1 ORDER BY position', [guildId]);
+  },
+
+  async getRulePoint(id) {
+    const parsedId = parseInt(id, 10);
+    if (isNaN(parsedId)) return null;
+    return await queryOne('SELECT * FROM rule_points WHERE id = $1', [parsedId]);
+  },
+
+  async updateRulePoint(id, { title, summary, details }) {
+    const parsedId = parseInt(id, 10);
+    if (isNaN(parsedId)) return;
+    await query(`
+      UPDATE rule_points SET title = $1, summary = $2, details = $3 WHERE id = $4
+    `, [title, summary, details ?? null, parsedId]);
+  },
+
+  async deleteRulePoint(id) {
+    const point = await this.getRulePoint(id);
+    if (!point) return null;
+
+    await query('DELETE FROM rule_points WHERE id = $1', [point.id]);
+
+    // Przenumerowanie pozostałych pozycji, żeby nie zostały dziury w kolejności
+    await query(`
+      UPDATE rule_points AS rp
+      SET position = sub.new_position
+      FROM (
+        SELECT id, ROW_NUMBER() OVER (ORDER BY position) - 1 AS new_position
+        FROM rule_points WHERE guild_id = $1
+      ) AS sub
+      WHERE rp.id = sub.id
+    `, [point.guild_id]);
+
+    return point;
+  },
+
+  async setRulePointMessageId(id, messageId) {
+    const parsedId = parseInt(id, 10);
+    if (isNaN(parsedId)) return;
+    await query('UPDATE rule_points SET message_id = $1 WHERE id = $2', [messageId, parsedId]);
+  },
+
+  async clearRulePointMessageIds(guildId) {
+    await query('UPDATE rule_points SET message_id = NULL WHERE guild_id = $1', [guildId]);
   },
 
   // --- Drabinka ról za poziomy ---
