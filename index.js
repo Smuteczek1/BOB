@@ -22,11 +22,9 @@ const { handleRoleButtonClick } = require('./utils/rolePanels');
 const {
   RULE_PRIVATE_OPEN_ID,
   RULE_PRIVATE_EXPAND_PREFIX,
-  RULE_PRIVATE_PAGE_PREFIX,
   RULE_ACCEPT_ID,
   handleOpenPrivateView,
   handlePrivateExpandClick,
-  handlePrivatePageChange,
   handleAcceptClick,
 } = require('./utils/verification');
 const {
@@ -129,11 +127,6 @@ client.on('interactionCreate', async (interaction) => {
 
     if (interaction.isButton() && interaction.customId.startsWith(RULE_PRIVATE_EXPAND_PREFIX)) {
       await handlePrivateExpandClick(interaction);
-      return;
-    }
-
-    if (interaction.isButton() && interaction.customId.startsWith(RULE_PRIVATE_PAGE_PREFIX)) {
-      await handlePrivatePageChange(interaction);
       return;
     }
 
