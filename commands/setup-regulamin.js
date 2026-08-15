@@ -1,12 +1,11 @@
 const { SlashCommandBuilder, ChannelType, PermissionFlagsBits, MessageFlags } = require('discord.js');
 const db = require('../db');
 const {
-  buildIntroEmbed,
-  buildRulePointEmbed,
-  buildRulePointButtonRow,
-  buildFinalVerifyEmbed,
-  buildPrivateViewButtonRow,
+  buildIntroContainer,
+  buildRulePointContainer,
+  buildFinalVerifyContainer,
   formatEmojiForReact,
+  V2_FLAGS,
 } = require('../utils/verification');
 
 module.exports = {
@@ -134,22 +133,20 @@ module.exports = {
       }
 
       // 1. Wstęp (z przyciskiem "Mój prywatny widok")
-      const introEmbed = buildIntroEmbed(interaction.guild, config);
-      const introRow = buildPrivateViewButtonRow();
-      const introMessage = await channel.send({ embeds: [introEmbed], components: [introRow] });
+      const introContainer = buildIntroContainer(interaction.guild, config);
+      const introMessage = await channel.send({ components: [introContainer], flags: V2_FLAGS });
 
-      // 2. Punkty regulaminu - każdy jako osobna wiadomość
+      // 2. Punkty regulaminu - każdy jako osobna wiadomość (tekst + przycisk "Rozwiń" obok siebie)
       for (let i = 0; i < points.length; i++) {
         const point = points[i];
-        const embed = buildRulePointEmbed(point, i + 1, points.length);
-        const row = buildRulePointButtonRow(point);
-        const sent = await channel.send({ embeds: [embed], components: row ? [row] : [] });
+        const container = buildRulePointContainer(point, i + 1, points.length);
+        const sent = await channel.send({ components: [container], flags: V2_FLAGS });
         await db.setRulePointMessageId(point.id, sent.id);
       }
 
       // 3. Wiadomość weryfikacyjna z reakcją (bot sam reaguje jako pierwszy, dla wygody)
-      const verifyEmbed = buildFinalVerifyEmbed(interaction.guild, config);
-      const verifyMessage = await channel.send({ embeds: [verifyEmbed] });
+      const verifyContainer = buildFinalVerifyContainer(interaction.guild, config);
+      const verifyMessage = await channel.send({ components: [verifyContainer], flags: V2_FLAGS });
       await verifyMessage.react(formatEmojiForReact(config.verify_emoji)).catch(err =>
         console.error('Nie udało się dodać reakcji bota (sprawdź czy emotka jest poprawna/bot ma do niej dostęp):', err)
       );
@@ -172,16 +169,16 @@ module.exports = {
       const config = await db.getGuildConfig(guildId);
       const points = await db.getRulePoints(guildId);
 
-      const embeds = [buildIntroEmbed(interaction.guild, config)];
-      points.forEach((p, i) => embeds.push(buildRulePointEmbed(p, i + 1, points.length)));
-      embeds.push(buildFinalVerifyEmbed(interaction.guild, config));
+      const containers = [buildIntroContainer(interaction.guild, config)];
+      points.forEach((p, i) => containers.push(buildRulePointContainer(p, i + 1, points.length)));
+      containers.push(buildFinalVerifyContainer(interaction.guild, config));
 
-      // Discord pozwala na maksymalnie 10 embedów w jednej wiadomości
-      await interaction.reply({ embeds: embeds.slice(0, 10), flags: MessageFlags.Ephemeral });
+      // Discord pozwala na maksymalnie 10 elementów najwyższego poziomu w jednej wiadomości
+      await interaction.reply({ components: containers.slice(0, 10), flags: MessageFlags.Ephemeral | V2_FLAGS });
 
-      if (embeds.length > 10) {
+      if (containers.length > 10) {
         await interaction.followUp({
-          content: `ℹ️ Podgląd pokazuje tylko pierwsze 10 z ${embeds.length} elementów (limit Discorda w jednej wiadomości). Cały regulamin zobaczysz po publikacji.`,
+          content: `ℹ️ Podgląd pokazuje tylko pierwsze 10 z ${containers.length} elementów (limit Discorda w jednej wiadomości). Cały regulamin zobaczysz po publikacji.`,
           flags: MessageFlags.Ephemeral,
         });
       }
