@@ -19,6 +19,17 @@ const {
   handleStyleModalSubmit,
 } = require('./utils/suggestions');
 const { handleRoleButtonClick } = require('./utils/rolePanels');
+const { RULE_EXPAND_PREFIX, handleRuleExpandClick } = require('./utils/verification');
+const {
+  RULE_POINT_EDIT_SELECT_ID,
+  RULE_POINT_DELETE_SELECT_ID,
+  RULE_POINT_ADD_MODAL_ID,
+  RULE_POINT_EDIT_MODAL_PREFIX,
+  handleRulePointEditSelect,
+  handleRulePointDeleteSelect,
+  handleRulePointAddModalSubmit,
+  handleRulePointEditModalSubmit,
+} = require('./utils/rulePoints');
 const { tickVoiceXp, COOLDOWN_MS } = require('./utils/leveling');
 const { LEVEL_ROLE_SELECT_CUSTOM_ID, handleLevelRoleSelectMenu } = require('./utils/levelRoles');
 
@@ -99,6 +110,31 @@ client.on('interactionCreate', async (interaction) => {
 
     if (interaction.isButton() && interaction.customId.startsWith('role_btn_')) {
       await handleRoleButtonClick(interaction);
+      return;
+    }
+
+    if (interaction.isButton() && interaction.customId.startsWith(RULE_EXPAND_PREFIX)) {
+      await handleRuleExpandClick(interaction);
+      return;
+    }
+
+    if (interaction.isStringSelectMenu() && interaction.customId === RULE_POINT_EDIT_SELECT_ID) {
+      await handleRulePointEditSelect(interaction);
+      return;
+    }
+
+    if (interaction.isStringSelectMenu() && interaction.customId === RULE_POINT_DELETE_SELECT_ID) {
+      await handleRulePointDeleteSelect(interaction);
+      return;
+    }
+
+    if (interaction.isModalSubmit() && interaction.customId === RULE_POINT_ADD_MODAL_ID) {
+      await handleRulePointAddModalSubmit(interaction);
+      return;
+    }
+
+    if (interaction.isModalSubmit() && interaction.customId.startsWith(RULE_POINT_EDIT_MODAL_PREFIX)) {
+      await handleRulePointEditModalSubmit(interaction);
       return;
     }
 
