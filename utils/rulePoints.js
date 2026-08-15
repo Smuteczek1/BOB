@@ -8,7 +8,7 @@ const {
   MessageFlags,
 } = require('discord.js');
 const db = require('../db');
-const { buildRulePointEmbed, buildRulePointButtonRow } = require('./verification');
+const { buildRulePointContainer, V2_FLAGS } = require('./verification');
 
 const RULE_POINT_EDIT_SELECT_ID = 'rule_point_edit_select';
 const RULE_POINT_DELETE_SELECT_ID = 'rule_point_delete_select';
@@ -188,9 +188,8 @@ async function handleRulePointEditModalSubmit(interaction) {
         if (msg) {
           const points = await db.getRulePoints(point.guild_id);
           const index = points.findIndex(p => p.id === point.id) + 1;
-          const embed = buildRulePointEmbed(point, index, points.length);
-          const row = buildRulePointButtonRow(point);
-          await msg.edit({ embeds: [embed], components: row ? [row] : [] }).catch(() => null);
+          const container = buildRulePointContainer(point, index, points.length);
+          await msg.edit({ components: [container], flags: V2_FLAGS }).catch(() => null);
         }
       }
     }
