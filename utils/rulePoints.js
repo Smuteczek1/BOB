@@ -8,7 +8,6 @@ const {
   MessageFlags,
 } = require('discord.js');
 const db = require('../db');
-const { buildRulePointContainer, V2_FLAGS } = require('./verification');
 
 const RULE_POINT_EDIT_SELECT_ID = 'rule_point_edit_select';
 const RULE_POINT_DELETE_SELECT_ID = 'rule_point_delete_select';
@@ -175,26 +174,10 @@ async function handleRulePointEditModalSubmit(interaction) {
   const details = interaction.fields.getTextInputValue('details') || null;
 
   await db.updateRulePoint(id, { title, summary, details });
-  const point = await db.getRulePoint(id);
 
-  // Jeśli punkt jest już opublikowany - od razu edytujemy jego wiadomość na kanale,
-  // bez konieczności ponownej publikacji całego regulaminu.
-  if (point?.message_id) {
-    const config = await db.getGuildConfig(point.guild_id);
-    if (config?.verify_channel_id) {
-      const channel = await interaction.guild.channels.fetch(config.verify_channel_id).catch(() => null);
-      if (channel) {
-        const msg = await channel.messages.fetch(point.message_id).catch(() => null);
-        if (msg) {
-          const points = await db.getRulePoints(point.guild_id);
-          const index = points.findIndex(p => p.id === point.id) + 1;
-          const container = buildRulePointContainer(point, index, points.length);
-          await msg.edit({ components: [container], flags: V2_FLAGS }).catch(() => null);
-        }
-      }
-    }
-  }
-
+  // Punkty nie są już publikowane jako osobne wiadomości - prywatny widok regulaminu
+  // buduje się od nowa przy każdym otwarciu, więc edycja od razu jest widoczna,
+  // bez potrzeby ręcznego odświeżania czegokolwiek na kanale.
   await interaction.reply({
     content: `✅ Zaktualizowano punkt **${title}**.`,
     flags: MessageFlags.Ephemeral,
