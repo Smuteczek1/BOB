@@ -13,17 +13,59 @@ const db = require('../db');
 
 const RULE_PRIVATE_OPEN_ID = 'rule_private_open';
 const RULE_PRIVATE_EXPAND_PREFIX = 'rule_private_expand_';
-const RULE_PRIVATE_PAGE_PREFIX = 'rule_private_page_';
 const RULE_ACCEPT_ID = 'rule_accept';
-
-// Ile punktów regulaminu pokazujemy na jednej "stronie" prywatnego widoku.
-// Discord (Components V2) pozwala na max 40 komponentów w jednej wiadomości,
-// a każdy punkt z "doprecyzowaniem" zajmuje kilka komponentów (Section + TextDisplay
-// + Button + Separator), więc trzeba dzielić długi regulamin na strony.
-const PAGE_SIZE = 5;
 
 // Flaga wymagana dla KAŻDEJ wiadomości używającej Components V2 (Container/Section/TextDisplay/...)
 const V2_FLAGS = MessageFlags.IsComponentsV2;
+
+// --- Automatyczny podział długiego regulaminu na kilka wiadomości ---
+// Discord (Components V2) pozwala na max 40 komponentów w JEDNEJ wiadomości.
+// Zamiast paginacji przyciskami, sami liczymy ile punktów regulaminu (z ewentualnym
+// "doprecyzowaniem") zmieści się w jednej wiadomości, i jeśli zabraknie miejsca,
+// automatycznie wysyłamy kolejną (osobną) wiadomość - wszystko nadal jedno pod drugim.
+const MAX_COMPONENTS_PER_MESSAGE = 40;
+const BASE_OVERHEAD = 4; // tytuł (+ ewentualnie opis na pierwszej wiadomości) + separator
+const ACCEPT_SECTION_OVERHEAD = 8; // tytuł+tekst akceptacji + przycisk/komentarz + separator
+const SAFETY_MARGIN = 3; // mały zapas na wszelki wypadek
+// Budżet komponentów dostępny na same punkty w jednej wiadomości.
+// Rezerwujemy miejsce na sekcję akceptacji w KAŻDEJ wiadomości (nie tylko ostatniej),
+// bo dopóki nie policzymy wszystkich punktów, nie wiemy, która wiadomość okaże się ostatnia.
+const POINTS_BUDGET_PER_MESSAGE =
+  MAX_COMPONENTS_PER_MESSAGE - BASE_OVERHEAD - ACCEPT_SECTION_OVERHEAD - SAFETY_MARGIN;
+
+// Ile komponentów "kosztuje" jeden punkt regulaminu w drzewie Components V2.
+function pointComponentCost(point) {
+  // Z doprecyzowaniem: Section + TextDisplay + Button + Separator = 4
+  // Bez doprecyzowania: TextDisplay + Separator = 2
+  return point.details ? 4 : 2;
+}
+
+// Dzieli punkty regulaminu na "porcje" (chunks), tak by każda porcja zmieściła się
+// bezpiecznie w jednej wiadomości Components V2, razem z ewentualną sekcją akceptacji.
+function chunkPoints(points) {
+  const chunks = [];
+  let current = [];
+  let currentCost = 0;
+
+  for (const point of points) {
+    const cost = pointComponentCost(point);
+    if (current.length > 0 && currentCost + cost > POINTS_BUDGET_PER_MESSAGE) {
+      chunks.push(current);
+      current = [];
+      currentCost = 0;
+    }
+    current.push(point);
+    currentCost += cost;
+  }
+
+  if (current.length > 0) {
+    chunks.push(current);
+  }
+
+  // Jeśli w ogóle nie ma punktów, zwracamy jedną pustą "porcję", żeby dało się
+  // pokazać choćby samą sekcję akceptacji.
+  return chunks.length > 0 ? chunks : [[]];
+}
 
 // --- Okno 1: publiczne "wejście" do regulaminu (jedyna wiadomość widoczna na kanale) ---
 const DEFAULT_RULES_TITLE = '📜 Regulamin serwera';
@@ -34,7 +76,7 @@ const DEFAULT_RULES_TEXT =
 const DEFAULT_BUTTON_LABEL = 'Sprawdź regulamin';
 const DEFAULT_INTRO_COMMENT = '-# Widok otworzy się tylko dla Ciebie — nikt inny go nie zobaczy.';
 
-// --- Okno 2: sekcja akceptacji na DOLE prywatnego widoku (pokazywana na ostatniej stronie) ---
+// --- Okno 2: sekcja akceptacji na DOLE prywatnego widoku (pokazywana w OSTATNIEJ wiadomości) ---
 const DEFAULT_ACCEPT_TITLE = 'Akceptacja regulaminu';
 const DEFAULT_ACCEPT_TEXT =
   'Przeczytałeś/aś wszystkie punkty powyżej? Kliknij przycisk poniżej, aby zaakceptować ' +
@@ -43,8 +85,7 @@ const DEFAULT_ACCEPT_BUTTON_LABEL = 'Akceptuję regulamin';
 const DEFAULT_ACCEPT_COMMENT = '-# Klikając, potwierdzasz że zapoznałeś/aś się z powyższymi zasadami.';
 
 // Trzyma stan "które punkty są rozwinięte" dla każdej prywatnej (ephemeral) wiadomości.
-// Klucz: ID wiadomości -> Set ID punktów aktualnie rozwiniętych. Żyje tylko na czas
-// działania procesu bota (to tylko UI-owy stan podglądu, nic nie trzeba tu trwale zapisywać).
+// Klucz: ID wiadomości -> Set ID punktów aktualnie rozwiniętych.
 const expandedPointsByMessage = new Map();
 
 function getExpandedSet(messageId) {
@@ -54,13 +95,11 @@ function getExpandedSet(messageId) {
   return expandedPointsByMessage.get(messageId);
 }
 
-// Trzyma stan "na której stronie regulaminu jest dana wiadomość".
-// Klucz: ID wiadomości -> numer strony (od 0). Tak samo jak wyżej — tylko stan UI.
-const pageByMessage = new Map();
-
-function getCurrentPage(messageId) {
-  return pageByMessage.get(messageId) ?? 0;
-}
+// Trzyma informację o tym, które punkty (i jaki fragment numeracji) pokazuje
+// KONKRETNA wiadomość - potrzebne, żeby po kliknięciu "Rozwiń" albo "Akceptuję"
+// przebudować właśnie TĘ wiadomość, a nie cały regulamin od nowa.
+// Klucz: ID wiadomości -> { pointIds: string[], startIndex: number, isLast: boolean }
+const chunkMetaByMessage = new Map();
 
 function memberHasVerifiedRole(member, config) {
   if (!member || !config?.verify_role_id) return false;
@@ -92,42 +131,40 @@ function buildIntroContainer(guild, config) {
   return container;
 }
 
-// --- Prywatny widok (ephemeral): regulamin podzielony na strony (akordeon na punkty)
-// + sekcja akceptacji na dole OSTATNIEJ strony. Rozwinięte punkty (ID w `expandedIds`)
-// pokazują doprecyzowanie TUŻ POD swoim podsumowaniem, reszta listy zostaje bez zmian.
-function buildRegulaminContainer(
+// --- Buduje JEDNĄ wiadomość prywatnego widoku, pokazującą tylko fragment ("porcję")
+// punktów regulaminu. `isFirst` decyduje czy pokazujemy opis regulaminu na górze,
+// `isLast` decyduje czy na dole doklejamy sekcję akceptacji. `startIndex` służy
+// do ciągłej numeracji punktów pomiędzy wiadomościami (np. 6. i 7. w drugiej wiadomości).
+function buildChunkContainer(
   guild,
-  points,
+  chunkPointsList,
   config,
-  expandedIds = new Set(),
-  alreadyVerified = false,
-  page = 0,
+  expandedIds,
+  alreadyVerified,
+  { isFirst, isLast, startIndex, multiMessage },
 ) {
   const container = new ContainerBuilder().setAccentColor(0x5865f2);
-
-  const totalPages = Math.max(1, Math.ceil(points.length / PAGE_SIZE));
-  const safePage = Math.min(Math.max(0, page), totalPages - 1);
 
   const title = config?.verify_rules_title || DEFAULT_RULES_TITLE;
   const description = config?.verify_rules_text || DEFAULT_RULES_TEXT;
 
-  container.addTextDisplayComponents(
-    new TextDisplayBuilder().setContent(
-      `## ${title}${totalPages > 1 ? ` (strona ${safePage + 1}/${totalPages})` : ''}`,
-    ),
-  );
-
-  // Opis regulaminu pokazujemy tylko na pierwszej stronie, żeby oszczędzić komponenty.
-  if (safePage === 0) {
-    container.addTextDisplayComponents(new TextDisplayBuilder().setContent(description));
+  if (isFirst) {
+    container.addTextDisplayComponents(
+      new TextDisplayBuilder().setContent(`## ${title}`),
+      new TextDisplayBuilder().setContent(description),
+    );
+    if (multiMessage) {
+      container.addTextDisplayComponents(
+        new TextDisplayBuilder().setContent(
+          '-# Regulamin jest długi, dlatego wysłałem go w kilku wiadomościach — przewiń niżej po kolejne punkty.',
+        ),
+      );
+    }
   }
 
   container.addSeparatorComponents(new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small));
 
-  const startIndex = safePage * PAGE_SIZE;
-  const pagePoints = points.slice(startIndex, startIndex + PAGE_SIZE);
-
-  pagePoints.forEach((p, i) => {
+  chunkPointsList.forEach((p, i) => {
     const globalIndex = startIndex + i;
     const isExpanded = expandedIds.has(String(p.id));
     let content = `### ${globalIndex + 1}. ${p.title}\n${p.summary}`;
@@ -151,32 +188,15 @@ function buildRegulaminContainer(
       container.addTextDisplayComponents(textDisplay);
     }
 
-    if (i < pagePoints.length - 1) {
+    if (i < chunkPointsList.length - 1) {
       container.addSeparatorComponents(new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small));
     }
   });
 
-  container.addSeparatorComponents(new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Large));
+  // --- Sekcja akceptacji: tylko w OSTATNIEJ wiadomości ---
+  if (isLast) {
+    container.addSeparatorComponents(new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Large));
 
-  // --- Nawigacja stron (tylko jeśli jest więcej niż jedna strona) ---
-  if (totalPages > 1) {
-    const prevButton = new ButtonBuilder()
-      .setCustomId(`${RULE_PRIVATE_PAGE_PREFIX}${safePage - 1}`)
-      .setLabel('◀ Poprzednia')
-      .setStyle(ButtonStyle.Secondary)
-      .setDisabled(safePage === 0);
-
-    const nextButton = new ButtonBuilder()
-      .setCustomId(`${RULE_PRIVATE_PAGE_PREFIX}${safePage + 1}`)
-      .setLabel('Następna ▶')
-      .setStyle(ButtonStyle.Secondary)
-      .setDisabled(safePage === totalPages - 1);
-
-    container.addActionRowComponents(new ActionRowBuilder().addComponents(prevButton, nextButton));
-  }
-
-  // --- Sekcja akceptacji: tylko na ostatniej stronie ---
-  if (safePage === totalPages - 1) {
     const acceptTitle = config?.verify_accept_title || DEFAULT_ACCEPT_TITLE;
     const acceptText = config?.verify_accept_text || DEFAULT_ACCEPT_TEXT;
     const acceptButtonLabel = (config?.verify_accept_button_label || DEFAULT_ACCEPT_BUTTON_LABEL).slice(0, 80);
@@ -205,7 +225,21 @@ function buildRegulaminContainer(
   return container;
 }
 
-// Kliknięcie "Sprawdź regulamin" na publicznej wiadomości - pierwsza (i jedyna) odpowiedź, ephemeral.
+// Zachowane dla kompatybilności (np. `/setup-regulamin podglad`) - buduje JEDEN,
+// pełny kontener ze wszystkimi punktami naraz (bez podziału na wiadomości).
+// UWAGA: przy bardzo długim regulaminie nadal może przekroczyć limit 40 komponentów -
+// używane tylko do szybkiego podglądu administracyjnego, nie do właściwej weryfikacji.
+function buildRegulaminContainer(guild, points, config, expandedIds = new Set(), alreadyVerified = false) {
+  return buildChunkContainer(guild, points, config, expandedIds, alreadyVerified, {
+    isFirst: true,
+    isLast: true,
+    startIndex: 0,
+    multiMessage: false,
+  });
+}
+
+// Kliknięcie "Sprawdź regulamin" na publicznej wiadomości - wysyła prywatny widok,
+// w JEDNEJ lub KILKU wiadomościach (automatycznie, w zależności od długości regulaminu).
 async function handleOpenPrivateView(interaction) {
   const guildId = interaction.guild.id;
   const config = await db.getGuildConfig(guildId);
@@ -217,23 +251,56 @@ async function handleOpenPrivateView(interaction) {
   }
 
   const alreadyVerified = memberHasVerifiedRole(interaction.member, config);
-  const container = buildRegulaminContainer(interaction.guild, points, config, new Set(), alreadyVerified, 0);
+  const chunks = chunkPoints(points);
+  const multiMessage = chunks.length > 1;
 
-  await interaction.reply({
-    components: [container],
-    flags: MessageFlags.Ephemeral | V2_FLAGS,
-  });
+  let startIndex = 0;
+
+  for (let i = 0; i < chunks.length; i++) {
+    const chunk = chunks[i];
+    const isFirst = i === 0;
+    const isLast = i === chunks.length - 1;
+
+    const container = buildChunkContainer(interaction.guild, chunk, config, new Set(), alreadyVerified, {
+      isFirst,
+      isLast,
+      startIndex,
+      multiMessage,
+    });
+
+    let message;
+    if (isFirst) {
+      await interaction.reply({
+        components: [container],
+        flags: MessageFlags.Ephemeral | V2_FLAGS,
+      });
+      message = await interaction.fetchReply();
+    } else {
+      message = await interaction.followUp({
+        components: [container],
+        flags: MessageFlags.Ephemeral | V2_FLAGS,
+      });
+    }
+
+    chunkMetaByMessage.set(message.id, {
+      pointIds: chunk.map(p => String(p.id)),
+      startIndex,
+      isLast,
+    });
+
+    startIndex += chunk.length;
+  }
 }
 
 // Kliknięcie "Rozwiń"/"Zwiń" PRZY KONKRETNYM punkcie - dopisuje (lub chowa) doprecyzowanie
-// TEGO punktu w miejscu, edytując tę samą wiadomość (interaction.update()), bez ruszania reszty.
+// TEGO punktu w miejscu, edytując tę samą wiadomość (interaction.update()), bez ruszania
+// pozostałych wiadomości (jeśli regulamin jest podzielony na kilka).
 async function handlePrivateExpandClick(interaction) {
   const id = interaction.customId.slice(RULE_PRIVATE_EXPAND_PREFIX.length);
   const guildId = interaction.guild.id;
   const config = await db.getGuildConfig(guildId);
   const points = await db.getRulePoints(guildId);
   const expanded = getExpandedSet(interaction.message.id);
-  const page = getCurrentPage(interaction.message.id);
 
   if (expanded.has(id)) {
     expanded.delete(id);
@@ -242,31 +309,27 @@ async function handlePrivateExpandClick(interaction) {
   }
 
   const alreadyVerified = memberHasVerifiedRole(interaction.member, config);
-  const container = buildRegulaminContainer(interaction.guild, points, config, expanded, alreadyVerified, page);
+  const meta = chunkMetaByMessage.get(interaction.message.id);
+
+  // Fallback (nie powinien wystąpić w normalnym użyciu): jeśli z jakiegoś powodu
+  // nie mamy zapisanej "porcji" dla tej wiadomości, traktujemy ją jako całość.
+  const chunk = meta ? points.filter(p => meta.pointIds.includes(String(p.id))) : points;
+  const startIndex = meta?.startIndex ?? 0;
+  const isLast = meta?.isLast ?? true;
+  const isFirst = startIndex === 0;
+
+  const container = buildChunkContainer(interaction.guild, chunk, config, expanded, alreadyVerified, {
+    isFirst,
+    isLast,
+    startIndex,
+    multiMessage: chunkMetaByMessage.size > 1,
+  });
 
   await interaction.update({ components: [container], flags: V2_FLAGS });
 }
 
-// Kliknięcie "Poprzednia"/"Następna" - zmienia stronę widoku, edytując tę samą wiadomość.
-async function handlePrivatePageChange(interaction) {
-  const requestedPage = parseInt(interaction.customId.slice(RULE_PRIVATE_PAGE_PREFIX.length), 10);
-  const guildId = interaction.guild.id;
-  const config = await db.getGuildConfig(guildId);
-  const points = await db.getRulePoints(guildId);
-  const expanded = getExpandedSet(interaction.message.id);
-
-  const totalPages = Math.max(1, Math.ceil(points.length / PAGE_SIZE));
-  const safePage = Math.min(Math.max(0, Number.isNaN(requestedPage) ? 0 : requestedPage), totalPages - 1);
-  pageByMessage.set(interaction.message.id, safePage);
-
-  const alreadyVerified = memberHasVerifiedRole(interaction.member, config);
-  const container = buildRegulaminContainer(interaction.guild, points, config, expanded, alreadyVerified, safePage);
-
-  await interaction.update({ components: [container], flags: V2_FLAGS });
-}
-
-// Kliknięcie przycisku akceptacji na DOLE prywatnego widoku - nadaje rolę (jeśli jeszcze
-// nie ma) i przebudowuje tę samą wiadomość, zamieniając przycisk na potwierdzenie.
+// Kliknięcie przycisku akceptacji na DOLE OSTATNIEJ wiadomości - nadaje rolę (jeśli jeszcze
+// nie ma) i przebudowuje TĘ wiadomość, zamieniając przycisk na potwierdzenie.
 async function handleAcceptClick(interaction) {
   const guildId = interaction.guild.id;
   const config = await db.getGuildConfig(guildId);
@@ -315,8 +378,19 @@ async function handleAcceptClick(interaction) {
 
   const points = await db.getRulePoints(guildId);
   const expanded = getExpandedSet(interaction.message.id);
-  const page = getCurrentPage(interaction.message.id);
-  const container = buildRegulaminContainer(interaction.guild, points, config, expanded, true, page);
+  const meta = chunkMetaByMessage.get(interaction.message.id);
+
+  const chunk = meta ? points.filter(p => meta.pointIds.includes(String(p.id))) : points;
+  const startIndex = meta?.startIndex ?? 0;
+  const isLast = meta?.isLast ?? true;
+  const isFirst = startIndex === 0;
+
+  const container = buildChunkContainer(interaction.guild, chunk, config, expanded, true, {
+    isFirst,
+    isLast,
+    startIndex,
+    multiMessage: chunkMetaByMessage.size > 1,
+  });
 
   await interaction.update({ components: [container], flags: V2_FLAGS });
 }
@@ -324,10 +398,8 @@ async function handleAcceptClick(interaction) {
 module.exports = {
   RULE_PRIVATE_OPEN_ID,
   RULE_PRIVATE_EXPAND_PREFIX,
-  RULE_PRIVATE_PAGE_PREFIX,
   RULE_ACCEPT_ID,
   V2_FLAGS,
-  PAGE_SIZE,
   DEFAULT_RULES_TITLE,
   DEFAULT_RULES_TEXT,
   DEFAULT_BUTTON_LABEL,
@@ -340,6 +412,5 @@ module.exports = {
   buildRegulaminContainer,
   handleOpenPrivateView,
   handlePrivateExpandClick,
-  handlePrivatePageChange,
   handleAcceptClick,
 };
