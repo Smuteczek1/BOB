@@ -16,6 +16,15 @@ const {
 } = require('discord.js');
 const db = require('../db');
 
+// Czy dana osoba (member) ma prawo zamykać tickety - tylko rola supportu
+// skonfigurowana przez admina ORAZ osoby z uprawnieniem "Zarządzaj serwerem".
+function canManageTicket(member, config) {
+  if (!member) return false;
+  if (member.permissions?.has(PermissionFlagsBits.ManageGuild)) return true;
+  if (config?.ticket_support_role_id && member.roles.cache.has(config.ticket_support_role_id)) return true;
+  return false;
+}
+
 const TICKET_TYPE_SELECT_ID = 'ticket_type_select';
 const TICKET_OPEN_MODAL_PREFIX = 'ticket_open_modal_';
 const TICKET_CLOSE_BUTTON_ID = 'ticket_close';
@@ -398,8 +407,17 @@ async function handleTicketCloseClick(interaction) {
     return;
   }
 
-  const type = ticket.type_id ? await db.getTicketType(ticket.type_id) : null;
   const config = await db.getGuildConfig(interaction.guild.id);
+
+  if (!canManageTicket(interaction.member, config)) {
+    await interaction.reply({
+      content: '⛔ Tylko support może zamknąć ten ticket.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  const type = ticket.type_id ? await db.getTicketType(ticket.type_id) : null;
   const isMain = interaction.message.id === ticket.welcome_message_id;
 
   const confirmContainer = isMain
@@ -426,6 +444,16 @@ async function handleTicketCloseCancel(interaction) {
 
 // Kliknięcie "Tak, zamknij" - zapisuje zamknięcie w bazie i usuwa kanał po krótkim odliczeniu.
 async function handleTicketCloseConfirm(interaction) {
+  const config = await db.getGuildConfig(interaction.guild.id);
+
+  if (!canManageTicket(interaction.member, config)) {
+    await interaction.reply({
+      content: '⛔ Tylko support może zamknąć ten ticket.',
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
   await db.closeTicket(interaction.channel.id, { closedBy: interaction.user.id });
 
   // Wiadomość z Components V2 nie może mieć zwykłego "content" obok komponentów,
