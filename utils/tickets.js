@@ -94,8 +94,14 @@ function buildPanelContainer(config, types) {
 }
 
 // --- Buduje wiadomość powitalną wewnątrz nowo utworzonego kanału ticketu ---
-function buildTicketWelcomeContainer(type, member, supportRoleId, isClosingConfirm = false) {
+function buildTicketWelcomeContainer(type, member, supportRoleId, isClosingConfirm = false, pingContent = null) {
   const container = new ContainerBuilder().setAccentColor(parseColorToInt(type?.color));
+
+  // Components V2 nie pozwala na zwykłe pole "content" w wiadomości, więc pingi
+  // (@user @rola-supportu) wstawiamy jako zwykły komponent tekstowy na samej górze.
+  if (pingContent) {
+    container.addTextDisplayComponents(new TextDisplayBuilder().setContent(pingContent));
+  }
 
   const emoji = type?.emoji ? `${type.emoji} ` : '🎫 ';
   container.addTextDisplayComponents(
@@ -139,6 +145,27 @@ function buildTicketWelcomeContainer(type, member, supportRoleId, isClosingConfi
   return container;
 }
 
+// Sprawdza rzeczywistą liczbę otwartych ticketów danej osoby - jeśli kanał jakiegoś
+// ticketu został ręcznie usunięty (np. przez admina bez użycia przycisku "Zamknij"),
+// automatycznie oznacza go w bazie jako zamknięty, żeby nie blokował limitu na zawsze.
+async function getEffectiveOpenTicketsCount(guild, guildId, userId) {
+  const openTickets = await db.getOpenTicketsForUser(guildId, userId);
+  let count = 0;
+
+  for (const ticket of openTickets) {
+    const channel = guild.channels.cache.get(ticket.channel_id)
+      || (await guild.channels.fetch(ticket.channel_id).catch(() => null));
+
+    if (channel) {
+      count += 1;
+    } else {
+      await db.closeTicket(ticket.channel_id, { closedBy: null });
+    }
+  }
+
+  return count;
+}
+
 // Kliknięcie opcji w select menu na panelu - tworzy nowy, prywatny kanał ticketu.
 async function handleTicketTypeSelect(interaction) {
   const guildId = interaction.guild.id;
@@ -162,7 +189,7 @@ async function handleTicketTypeSelect(interaction) {
   }
 
   const limit = config.ticket_limit_per_user ?? 1;
-  const openCount = await db.getOpenTicketsCountForUser(guildId, interaction.user.id);
+  const openCount = await getEffectiveOpenTicketsCount(interaction.guild, guildId, interaction.user.id);
   if (openCount >= limit) {
     await interaction.reply({
       content: `⚠️ Masz już otwarte ${openCount} ${openCount === 1 ? 'zgłoszenie' : 'zgłoszenia'} (limit: ${limit}). Zamknij poprzednie, zanim otworzysz nowe.`,
@@ -235,13 +262,15 @@ async function handleTicketTypeSelect(interaction) {
 
   await db.createTicket(guildId, { channelId: channel.id, userId: interaction.user.id, typeId: type.id });
 
-  const welcomeContainer = buildTicketWelcomeContainer(type, interaction.member, config.ticket_support_role_id, false);
-  const pingContent = config.ticket_support_role_id
-    ? `<@${interaction.user.id}> <@&${config.ticket_support_role_id}>`
-    : `<@${interaction.user.id}>`;
+  const welcomeContainer = buildTicketWelcomeContainer(
+    type,
+    interaction.member,
+    config.ticket_support_role_id,
+    false,
+    config.ticket_support_role_id ? `<@${interaction.user.id}> <@&${config.ticket_support_role_id}>` : `<@${interaction.user.id}>`,
+  );
 
   await channel.send({
-    content: pingContent,
     components: [welcomeContainer],
     flags: V2_FLAGS,
     allowedMentions: { users: [interaction.user.id], roles: config.ticket_support_role_id ? [config.ticket_support_role_id] : [] },
