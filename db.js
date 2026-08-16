@@ -69,7 +69,6 @@ async function initDb() {
         ended_at BIGINT NOT NULL,
         duration_seconds INT NOT NULL
       );
-
       CREATE INDEX IF NOT EXISTS idx_sessions_guild ON sessions(guild_id);
 
       CREATE TABLE IF NOT EXISTS role_panels (
@@ -93,7 +92,6 @@ async function initDb() {
         custom_id TEXT,
         position INT
       );
-
       CREATE INDEX IF NOT EXISTS idx_role_panel_items_panel ON role_panel_items(panel_id);
 
       CREATE TABLE IF NOT EXISTS user_levels (
@@ -125,7 +123,6 @@ async function initDb() {
         downvote_emoji TEXT,
         created_at BIGINT
       );
-
       CREATE INDEX IF NOT EXISTS idx_suggestion_boards_guild ON suggestion_boards(guild_id);
       CREATE INDEX IF NOT EXISTS idx_suggestion_boards_create_channel ON suggestion_boards(create_channel_id);
 
@@ -139,8 +136,34 @@ async function initDb() {
         message_id TEXT,
         created_at BIGINT
       );
-
       CREATE INDEX IF NOT EXISTS idx_rule_points_guild ON rule_points(guild_id);
+
+      CREATE TABLE IF NOT EXISTS ticket_types (
+        id SERIAL PRIMARY KEY,
+        guild_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        color TEXT NOT NULL,
+        emoji TEXT,
+        description TEXT,
+        position INT NOT NULL DEFAULT 0,
+        created_at BIGINT
+      );
+      CREATE INDEX IF NOT EXISTS idx_ticket_types_guild ON ticket_types(guild_id);
+
+      CREATE TABLE IF NOT EXISTS tickets (
+        id SERIAL PRIMARY KEY,
+        guild_id TEXT NOT NULL,
+        channel_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        type_id INT REFERENCES ticket_types(id) ON DELETE SET NULL,
+        status TEXT NOT NULL DEFAULT 'open',
+        opened_at BIGINT NOT NULL,
+        closed_at BIGINT,
+        closed_by TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_tickets_guild ON tickets(guild_id);
+      CREATE INDEX IF NOT EXISTS idx_tickets_channel ON tickets(channel_id);
+      CREATE INDEX IF NOT EXISTS idx_tickets_user_status ON tickets(guild_id, user_id, status);
     `);
 
     // Bezpieczne dodanie kolumny last_daily_at, jeśli tabela user_levels już istniała bez niej
@@ -170,7 +193,15 @@ async function initDb() {
         ADD COLUMN IF NOT EXISTS verify_accept_button_label TEXT,
         ADD COLUMN IF NOT EXISTS verify_accept_comment TEXT,
         ADD COLUMN IF NOT EXISTS verify_emoji TEXT,
-        ADD COLUMN IF NOT EXISTS verify_intro_message_id TEXT;
+        ADD COLUMN IF NOT EXISTS verify_intro_message_id TEXT,
+        ADD COLUMN IF NOT EXISTS ticket_category_id TEXT,
+        ADD COLUMN IF NOT EXISTS ticket_support_role_id TEXT,
+        ADD COLUMN IF NOT EXISTS ticket_panel_channel_id TEXT,
+        ADD COLUMN IF NOT EXISTS ticket_panel_message_id TEXT,
+        ADD COLUMN IF NOT EXISTS ticket_limit_per_user INT DEFAULT 1,
+        ADD COLUMN IF NOT EXISTS ticket_panel_title TEXT,
+        ADD COLUMN IF NOT EXISTS ticket_panel_text TEXT,
+        ADD COLUMN IF NOT EXISTS ticket_panel_placeholder TEXT;
     `);
 
     console.log('✅ Baza danych Supabase (PostgreSQL) została pomyślnie zainicjalizowana.');
@@ -439,10 +470,10 @@ module.exports = {
   async canClaimDaily(guildId, userId) {
     const row = await this.getUserLevel(guildId, userId);
     if (!row || !row.last_daily_at) return true;
-  
+
     const todayWarsaw = getWarsawDateString();
     const lastClaimWarsaw = getWarsawDateString(row.last_daily_at);
-  
+
     return todayWarsaw !== lastClaimWarsaw;
   },
 
@@ -670,5 +701,127 @@ module.exports = {
 
   async getLevelRoles(guildId) {
     return await queryMany('SELECT * FROM level_roles WHERE guild_id = $1 ORDER BY level DESC', [guildId]);
+  },
+
+  // --- Tickety: konfiguracja serwera ---
+  async setTicketConfig(guildId, { categoryId, supportRoleId, limitPerUser }) {
+    const existing = await this.getGuildConfig(guildId);
+    if (existing) {
+      await query(`
+        UPDATE guild_config
+        SET ticket_category_id = COALESCE($1, ticket_category_id),
+            ticket_support_role_id = COALESCE($2, ticket_support_role_id),
+            ticket_limit_per_user = COALESCE($3, ticket_limit_per_user)
+        WHERE guild_id = $4
+      `, [categoryId ?? null, supportRoleId ?? null, limitPerUser ?? null, guildId]);
+    } else {
+      await query(`
+        INSERT INTO guild_config (guild_id, ticket_category_id, ticket_support_role_id, ticket_limit_per_user, created_at)
+        VALUES ($1, $2, $3, $4, $5)
+      `, [guildId, categoryId ?? null, supportRoleId ?? null, limitPerUser ?? 1, Date.now()]);
+    }
+  },
+
+  async setTicketPanelConfig(guildId, { channelId, messageId, title, text, placeholder }) {
+    const existing = await this.getGuildConfig(guildId);
+    const pick = (val, fallback) => (val !== undefined ? val : fallback);
+
+    if (existing) {
+      await query(`
+        UPDATE guild_config
+        SET ticket_panel_channel_id = $1,
+            ticket_panel_message_id = $2,
+            ticket_panel_title = $3,
+            ticket_panel_text = $4,
+            ticket_panel_placeholder = $5
+        WHERE guild_id = $6
+      `, [
+        pick(channelId, existing.ticket_panel_channel_id),
+        pick(messageId, existing.ticket_panel_message_id),
+        pick(title, existing.ticket_panel_title),
+        pick(text, existing.ticket_panel_text),
+        pick(placeholder, existing.ticket_panel_placeholder),
+        guildId,
+      ]);
+    } else {
+      await query(`
+        INSERT INTO guild_config (guild_id, ticket_panel_channel_id, ticket_panel_message_id, ticket_panel_title, ticket_panel_text, ticket_panel_placeholder, created_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `, [guildId, channelId ?? null, messageId ?? null, title ?? null, text ?? null, placeholder ?? null, Date.now()]);
+    }
+  },
+
+  // --- Typy ticketów ---
+  async addTicketType(guildId, { name, color, emoji, description }) {
+    const countRow = await queryOne('SELECT COUNT(*)::int as c FROM ticket_types WHERE guild_id = $1', [guildId]);
+    const position = countRow ? countRow.c : 0;
+    return await queryOne(`
+      INSERT INTO ticket_types (guild_id, name, color, emoji, description, position, created_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7)
+      RETURNING *
+    `, [guildId, name, color, emoji ?? null, description ?? null, position, Date.now()]);
+  },
+
+  async getTicketTypes(guildId) {
+    return await queryMany('SELECT * FROM ticket_types WHERE guild_id = $1 ORDER BY position', [guildId]);
+  },
+
+  async getTicketType(id) {
+    const parsedId = parseInt(id, 10);
+    if (isNaN(parsedId)) return null;
+    return await queryOne('SELECT * FROM ticket_types WHERE id = $1', [parsedId]);
+  },
+
+  async getTicketTypeByName(guildId, name) {
+    return await queryOne('SELECT * FROM ticket_types WHERE guild_id = $1 AND LOWER(name) = LOWER($2)', [guildId, name]);
+  },
+
+  async deleteTicketType(id) {
+    const type = await this.getTicketType(id);
+    if (!type) return null;
+
+    await query('DELETE FROM ticket_types WHERE id = $1', [type.id]);
+
+    // Przenumerowanie pozostałych pozycji, żeby nie zostały dziury w kolejności
+    await query(`
+      UPDATE ticket_types AS tt
+      SET position = sub.new_position
+      FROM (
+        SELECT id, ROW_NUMBER() OVER (ORDER BY position) - 1 AS new_position
+        FROM ticket_types WHERE guild_id = $1
+      ) AS sub
+      WHERE tt.id = sub.id
+    `, [type.guild_id]);
+
+    return type;
+  },
+
+  // --- Tickety (instancje) ---
+  async createTicket(guildId, { channelId, userId, typeId }) {
+    return await queryOne(`
+      INSERT INTO tickets (guild_id, channel_id, user_id, type_id, status, opened_at)
+      VALUES ($1, $2, $3, $4, 'open', $5)
+      RETURNING *
+    `, [guildId, channelId, userId, typeId ?? null, Date.now()]);
+  },
+
+  async getTicketByChannel(channelId) {
+    return await queryOne('SELECT * FROM tickets WHERE channel_id = $1', [channelId]);
+  },
+
+  async getOpenTicketsCountForUser(guildId, userId) {
+    const row = await queryOne(`
+      SELECT COUNT(*)::int as c FROM tickets
+      WHERE guild_id = $1 AND user_id = $2 AND status = 'open'
+    `, [guildId, userId]);
+    return row ? row.c : 0;
+  },
+
+  async closeTicket(channelId, { closedBy }) {
+    await query(`
+      UPDATE tickets
+      SET status = 'closed', closed_at = $1, closed_by = $2
+      WHERE channel_id = $3
+    `, [Date.now(), closedBy ?? null, channelId]);
   },
 };
