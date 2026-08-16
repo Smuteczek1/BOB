@@ -41,10 +41,12 @@ const { tickVoiceXp, COOLDOWN_MS } = require('./utils/leveling');
 const { LEVEL_ROLE_SELECT_CUSTOM_ID, handleLevelRoleSelectMenu } = require('./utils/levelRoles');
 const {
   TICKET_TYPE_SELECT_ID,
+  TICKET_OPEN_MODAL_PREFIX,
   TICKET_CLOSE_BUTTON_ID,
   TICKET_CLOSE_CONFIRM_ID,
   TICKET_CLOSE_CANCEL_ID,
   handleTicketTypeSelect,
+  handleTicketOpenModalSubmit,
   handleTicketCloseClick,
   handleTicketCloseCancel,
   handleTicketCloseConfirm,
@@ -172,6 +174,11 @@ client.on('interactionCreate', async (interaction) => {
 
     if (interaction.isStringSelectMenu() && interaction.customId === TICKET_TYPE_SELECT_ID) {
       await handleTicketTypeSelect(interaction);
+      return;
+    }
+
+    if (interaction.isModalSubmit() && interaction.customId.startsWith(TICKET_OPEN_MODAL_PREFIX)) {
+      await handleTicketOpenModalSubmit(interaction);
       return;
     }
 
