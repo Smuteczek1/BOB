@@ -88,18 +88,45 @@ const DEFAULT_ACCEPT_COMMENT = '-# Klikając, potwierdzasz że zapoznałeś/aś 
 // Klucz: ID wiadomości -> Set ID punktów aktualnie rozwiniętych.
 const expandedPointsByMessage = new Map();
 
-function getExpandedSet(messageId) {
-  if (!expandedPointsByMessage.has(messageId)) {
-    expandedPointsByMessage.set(messageId, new Set());
-  }
-  return expandedPointsByMessage.get(messageId);
-}
-
 // Trzyma informację o tym, które punkty (i jaki fragment numeracji) pokazuje
 // KONKRETNA wiadomość - potrzebne, żeby po kliknięciu "Rozwiń" albo "Akceptuję"
 // przebudować właśnie TĘ wiadomość, a nie cały regulamin od nowa.
 // Klucz: ID wiadomości -> { pointIds: string[], startIndex: number, isLast: boolean }
 const chunkMetaByMessage = new Map();
+
+// Znacznik czasu ostatniej interakcji z daną wiadomością - używany WYŁĄCZNIE do
+// sprzątania (patrz niżej), żeby powyższe dwie mapy nie rosły w nieskończoność
+// przez cały czas działania bota (każde otwarcie prywatnego widoku dokładałoby wpis,
+// który inaczej nigdy by nie zniknął).
+const messageLastTouchedAt = new Map();
+
+function touchMessage(messageId) {
+  messageLastTouchedAt.set(messageId, Date.now());
+}
+
+// Co 30 minut usuwamy wpisy nietykane od ponad 2h - w tym czasie i tak nikt już nie
+// wraca do klikania w stary, prywatny widok regulaminu.
+const MAP_ENTRY_TTL_MS = 2 * 60 * 60 * 1000;
+const CLEANUP_INTERVAL_MS = 30 * 60 * 1000;
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [messageId, lastTouched] of messageLastTouchedAt) {
+    if (now - lastTouched > MAP_ENTRY_TTL_MS) {
+      messageLastTouchedAt.delete(messageId);
+      expandedPointsByMessage.delete(messageId);
+      chunkMetaByMessage.delete(messageId);
+    }
+  }
+}, CLEANUP_INTERVAL_MS).unref();
+
+function getExpandedSet(messageId) {
+  touchMessage(messageId);
+  if (!expandedPointsByMessage.has(messageId)) {
+    expandedPointsByMessage.set(messageId, new Set());
+  }
+  return expandedPointsByMessage.get(messageId);
+}
 
 function memberHasVerifiedRole(member, config) {
   if (!member || !config?.verify_role_id) return false;
@@ -287,6 +314,7 @@ async function handleOpenPrivateView(interaction) {
       startIndex,
       isLast,
     });
+    touchMessage(message.id);
 
     startIndex += chunk.length;
   }
