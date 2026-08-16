@@ -39,6 +39,16 @@ const {
 } = require('./utils/rulePoints');
 const { tickVoiceXp, COOLDOWN_MS } = require('./utils/leveling');
 const { LEVEL_ROLE_SELECT_CUSTOM_ID, handleLevelRoleSelectMenu } = require('./utils/levelRoles');
+const {
+  TICKET_TYPE_SELECT_ID,
+  TICKET_CLOSE_BUTTON_ID,
+  TICKET_CLOSE_CONFIRM_ID,
+  TICKET_CLOSE_CANCEL_ID,
+  handleTicketTypeSelect,
+  handleTicketCloseClick,
+  handleTicketCloseCancel,
+  handleTicketCloseConfirm,
+} = require('./utils/tickets');
 
 // --- Uruchomienie prostego serwera HTTP dla Render.com ---
 const app = express();
@@ -157,6 +167,26 @@ client.on('interactionCreate', async (interaction) => {
 
     if (interaction.isStringSelectMenu() && interaction.customId === LEVEL_ROLE_SELECT_CUSTOM_ID) {
       await handleLevelRoleSelectMenu(interaction);
+      return;
+    }
+
+    if (interaction.isStringSelectMenu() && interaction.customId === TICKET_TYPE_SELECT_ID) {
+      await handleTicketTypeSelect(interaction);
+      return;
+    }
+
+    if (interaction.isButton() && interaction.customId === TICKET_CLOSE_BUTTON_ID) {
+      await handleTicketCloseClick(interaction);
+      return;
+    }
+
+    if (interaction.isButton() && interaction.customId === TICKET_CLOSE_CONFIRM_ID) {
+      await handleTicketCloseConfirm(interaction);
+      return;
+    }
+
+    if (interaction.isButton() && interaction.customId === TICKET_CLOSE_CANCEL_ID) {
+      await handleTicketCloseCancel(interaction);
       return;
     }
   } catch (err) {
