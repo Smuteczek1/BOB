@@ -817,6 +817,12 @@ module.exports = {
     return row ? row.c : 0;
   },
 
+  async getOpenTicketsForUser(guildId, userId) {
+    return await queryMany(`
+      SELECT * FROM tickets WHERE guild_id = $1 AND user_id = $2 AND status = 'open'
+    `, [guildId, userId]);
+  },
+
   async closeTicket(channelId, { closedBy }) {
     await query(`
       UPDATE tickets
