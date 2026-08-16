@@ -51,6 +51,40 @@ const {
   handleTicketCloseCancel,
   handleTicketCloseConfirm,
 } = require('./utils/tickets');
+const {
+  PANEL_HOME_ID,
+  PANEL_CATEGORY_PREFIX,
+  ONB_BACK_ID,
+  ONB_WELCOME_OPEN_ID,
+  ONB_WELCOME_CHANNEL_ID,
+  ONB_WELCOME_TOGGLE_ID,
+  ONB_WELCOME_EDIT_ID,
+  ONB_WELCOME_EDIT_MODAL_ID,
+  ONB_GOODBYE_OPEN_ID,
+  ONB_GOODBYE_CHANNEL_ID,
+  ONB_GOODBYE_TOGGLE_ID,
+  ONB_GOODBYE_EDIT_ID,
+  ONB_GOODBYE_EDIT_MODAL_ID,
+  ONB_ROLE_OPEN_ID,
+  ONB_ROLE_SELECT_ID,
+  ONB_ROLE_TOGGLE_ID,
+  handlePanelHomeClick,
+  handleCategoryClick,
+  handleOnboardingBack,
+  handleWelcomeOpen,
+  handleWelcomeChannelSelect,
+  handleWelcomeToggle,
+  handleWelcomeEditClick,
+  handleWelcomeEditModalSubmit,
+  handleGoodbyeOpen,
+  handleGoodbyeChannelSelect,
+  handleGoodbyeToggle,
+  handleGoodbyeEditClick,
+  handleGoodbyeEditModalSubmit,
+  handleStarterRoleOpen,
+  handleStarterRoleSelect,
+  handleStarterRoleToggle,
+} = require('./utils/panel');
 
 // --- Uruchomienie prostego serwera HTTP dla Render.com ---
 const app = express();
@@ -194,6 +228,87 @@ client.on('interactionCreate', async (interaction) => {
 
     if (interaction.isButton() && interaction.customId === TICKET_CLOSE_CANCEL_ID) {
       await handleTicketCloseCancel(interaction);
+      return;
+    }
+
+    // --- Panel konfiguracji (/panel) ---
+    if (interaction.isButton() && interaction.customId === PANEL_HOME_ID) {
+      await handlePanelHomeClick(interaction);
+      return;
+    }
+
+    if (interaction.isButton() && interaction.customId.startsWith(PANEL_CATEGORY_PREFIX)) {
+      await handleCategoryClick(interaction);
+      return;
+    }
+
+    if (interaction.isButton() && interaction.customId === ONB_BACK_ID) {
+      await handleOnboardingBack(interaction);
+      return;
+    }
+
+    if (interaction.isButton() && interaction.customId === ONB_WELCOME_OPEN_ID) {
+      await handleWelcomeOpen(interaction);
+      return;
+    }
+
+    if (interaction.isChannelSelectMenu() && interaction.customId === ONB_WELCOME_CHANNEL_ID) {
+      await handleWelcomeChannelSelect(interaction);
+      return;
+    }
+
+    if (interaction.isButton() && interaction.customId === ONB_WELCOME_TOGGLE_ID) {
+      await handleWelcomeToggle(interaction);
+      return;
+    }
+
+    if (interaction.isButton() && interaction.customId === ONB_WELCOME_EDIT_ID) {
+      await handleWelcomeEditClick(interaction);
+      return;
+    }
+
+    if (interaction.isModalSubmit() && interaction.customId === ONB_WELCOME_EDIT_MODAL_ID) {
+      await handleWelcomeEditModalSubmit(interaction);
+      return;
+    }
+
+    if (interaction.isButton() && interaction.customId === ONB_GOODBYE_OPEN_ID) {
+      await handleGoodbyeOpen(interaction);
+      return;
+    }
+
+    if (interaction.isChannelSelectMenu() && interaction.customId === ONB_GOODBYE_CHANNEL_ID) {
+      await handleGoodbyeChannelSelect(interaction);
+      return;
+    }
+
+    if (interaction.isButton() && interaction.customId === ONB_GOODBYE_TOGGLE_ID) {
+      await handleGoodbyeToggle(interaction);
+      return;
+    }
+
+    if (interaction.isButton() && interaction.customId === ONB_GOODBYE_EDIT_ID) {
+      await handleGoodbyeEditClick(interaction);
+      return;
+    }
+
+    if (interaction.isModalSubmit() && interaction.customId === ONB_GOODBYE_EDIT_MODAL_ID) {
+      await handleGoodbyeEditModalSubmit(interaction);
+      return;
+    }
+
+    if (interaction.isButton() && interaction.customId === ONB_ROLE_OPEN_ID) {
+      await handleStarterRoleOpen(interaction);
+      return;
+    }
+
+    if (interaction.isRoleSelectMenu() && interaction.customId === ONB_ROLE_SELECT_ID) {
+      await handleStarterRoleSelect(interaction);
+      return;
+    }
+
+    if (interaction.isButton() && interaction.customId === ONB_ROLE_TOGGLE_ID) {
+      await handleStarterRoleToggle(interaction);
       return;
     }
   } catch (err) {
