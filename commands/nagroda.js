@@ -29,36 +29,43 @@ module.exports = {
     let minXp = 0;
     let maxXp = 0;
 
+                    // 35,0%
     if (roll < 0.35) {
       tier = '⚪ Pospolita Skrzynia';
       color = 0x95a5a6;
       minXp = 50;
       maxXp = 100;
+                          // 28,0%
     } else if (roll < 0.63) {
       tier = '🟢 Niezwykła Skrzynia';
       color = 0x2ecc71;
       minXp = 101;
       maxXp = 200;
+                          // 19,0%
     } else if (roll < 0.82) {
       tier = '🔵 Rzadka Skrzynia';
       color = 0x3498db;
       minXp = 201;
       maxXp = 350;
+                          // 10,0%
     } else if (roll < 0.92) {
       tier = '🟣 Legendarna Skrzynia';
       color = 0x9b59b6;
       minXp = 351;
       maxXp = 600;
+                          // 5,5%
     } else if (roll < 0.975) {
       tier = '🟠 Mityczna Skrzynia!';
       color = 0xe67e22;
       minXp = 601;
       maxXp = 1200;
+                          // 2,0%
     } else if (roll < 0.995) {
       tier = '🔴 Boska Skrzynia!!';
       color = 0xe74c3c;
       minXp = 1201;
       maxXp = 2200;
+                          // 0,5%
     } else {
       tier = '⚫ VOID SKRZYNIA!!!';
       color = 0x1a1a2e;
