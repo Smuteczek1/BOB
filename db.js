@@ -157,6 +157,9 @@ async function initDb() {
         user_id TEXT NOT NULL,
         type_id INT REFERENCES ticket_types(id) ON DELETE SET NULL,
         status TEXT NOT NULL DEFAULT 'open',
+        description TEXT,
+        welcome_message_id TEXT,
+        message_count INT NOT NULL DEFAULT 0,
         opened_at BIGINT NOT NULL,
         closed_at BIGINT,
         closed_by TEXT
@@ -202,6 +205,15 @@ async function initDb() {
         ADD COLUMN IF NOT EXISTS ticket_panel_title TEXT,
         ADD COLUMN IF NOT EXISTS ticket_panel_text TEXT,
         ADD COLUMN IF NOT EXISTS ticket_panel_placeholder TEXT;
+    `);
+
+    // Bezpieczne dodanie nowych kolumn systemu ticketów, jeśli tabela tickets
+    // już istniała bez nich (np. na już działającym bocie)
+    await query(`
+      ALTER TABLE tickets
+        ADD COLUMN IF NOT EXISTS description TEXT,
+        ADD COLUMN IF NOT EXISTS welcome_message_id TEXT,
+        ADD COLUMN IF NOT EXISTS message_count INT NOT NULL DEFAULT 0;
     `);
 
     console.log('✅ Baza danych Supabase (PostgreSQL) została pomyślnie zainicjalizowana.');
@@ -797,12 +809,25 @@ module.exports = {
   },
 
   // --- Tickety (instancje) ---
-  async createTicket(guildId, { channelId, userId, typeId }) {
+  async createTicket(guildId, { channelId, userId, typeId, description }) {
     return await queryOne(`
-      INSERT INTO tickets (guild_id, channel_id, user_id, type_id, status, opened_at)
-      VALUES ($1, $2, $3, $4, 'open', $5)
+      INSERT INTO tickets (guild_id, channel_id, user_id, type_id, description, status, opened_at)
+      VALUES ($1, $2, $3, $4, $5, 'open', $6)
       RETURNING *
-    `, [guildId, channelId, userId, typeId ?? null, Date.now()]);
+    `, [guildId, channelId, userId, typeId ?? null, description ?? null, Date.now()]);
+  },
+
+  async setTicketWelcomeMessageId(channelId, messageId) {
+    await query('UPDATE tickets SET welcome_message_id = $1 WHERE channel_id = $2', [messageId, channelId]);
+  },
+
+  async incrementTicketMessageCount(channelId) {
+    const row = await queryOne(`
+      UPDATE tickets SET message_count = message_count + 1
+      WHERE channel_id = $1
+      RETURNING message_count
+    `, [channelId]);
+    return row ? row.message_count : 0;
   },
 
   async getTicketByChannel(channelId) {
