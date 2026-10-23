@@ -1,22 +1,67 @@
 const {
-  SlashCommandBuilder, EmbedBuilder, ActionRowBuilder, StringSelectMenuBuilder, ComponentType, MessageFlags,
+  SlashCommandBuilder, ContainerBuilder, SectionBuilder, TextDisplayBuilder, SeparatorBuilder, SeparatorSpacingSize,
+  ActionRowBuilder, ButtonBuilder, ButtonStyle, ComponentType, MessageFlags,
 } = require('discord.js');
-const db = require('../db');
 const inv = require('../utils/inventory');
 const items = require('../utils/items');
 const { useItem } = require('../utils/itemUse');
-const { runChestGame, TIER_QUIPS } = require('../utils/chestGame');
+const { TIER_QUIPS } = require('../utils/chestGame');
+const { runOpening } = require('../utils/chestOpen');
 const { DAILY_TIERS, formatCoins } = require('../utils/economy');
 
 const PICK_TIME_MS = Number(process.env.CHEST_PICK_TIME_MS ?? 60_000);
 const OPEN_DELAY_MS = Number(process.env.CHEST_FRAME_DELAY_MS ?? 2000);
-const MENU_ID = 'inv_use';
-const KIND_TAG = { consumable: 'J', permanent: 'S', collectible: 'K' };
+
+// Ekwipunek jest zbudowany z Components V2 (jak /sklep). Discord pozwala na max 40 komponentów w wiadomości,
+// a jeden wiersz z przyciskiem to 3 (sekcja + tekst + przycisk), więc lista dzieli się na strony.
+const V2 = MessageFlags.IsComponentsV2;
+const USE_PREFIX = 'inv_use:';   // inv_use:<id_przedmiotu>
+const OPEN_PREFIX = 'inv_open:'; // inv_open:<id_skrzyni>
+const PREV_ID = 'inv_prev';
+const NEXT_ID = 'inv_next';
+const PAGE_ID = 'inv_page';
+const ROWS_PER_PAGE = 7;
+
+const KIND_LABEL = { consumable: 'jednorazowy', permanent: 'stały', collectible: 'kolekcjonerski' };
+
+// Przedmioty "pieniężne" (Teczka ... Czarna Skrzynka: nic / suma / mandat) otwierają się jak skrzynie
+const isMoneyItem = (def) => def?.use?.type === 'money';
+const GAIN_COLOR = 0x2ecc71; // kolor wyniku "wygrana" zwracany przez useItem
 
 const minutesLeft = (ms) => Math.max(1, Math.ceil((ms - Date.now()) / 60000));
 const nameOf = (user) => user.displayName ?? user.username;
+const small = () => new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small);
 
-async function buildView(guildId, user, banner) {
+// Lista pozycji z przyciskami: najpierw skrzynie (w kolejności z katalogu), potem przedmioty od najwyższego poziomu.
+// Kolekcjonerskie nie mają przycisku, są pokazane osobno w tekście.
+function collectEntries(inventory) {
+  const chestOrder = Object.keys(items.CHESTS);
+  const chests = inventory
+    .filter((i) => items.isChest(i.itemId))
+    .sort((a, b) => chestOrder.indexOf(a.itemId) - chestOrder.indexOf(b.itemId))
+    .map((r) => ({ type: 'chest', def: items.CHESTS[r.itemId], qty: r.quantity }));
+  const owned = inventory
+    .filter((i) => !items.isChest(i.itemId) && items.ITEMS[i.itemId])
+    .sort((a, b) => items.ITEMS[b.itemId].tier - items.ITEMS[a.itemId].tier);
+  const usable = owned
+    .filter((r) => items.ITEMS[r.itemId].kind !== 'collectible')
+    .map((r) => ({ type: 'item', def: items.ITEMS[r.itemId], qty: r.quantity }));
+  const collection = owned
+    .filter((r) => items.ITEMS[r.itemId].kind === 'collectible')
+    .map((r) => items.ITEMS[r.itemId]);
+  return { entries: [...chests, ...usable], collection };
+}
+
+function entryText(e) {
+  if (e.type === 'chest') {
+    return `${e.def.emoji} **${e.def.name}** ×${e.qty}\n-# otwiera się publicznie na kanale`;
+  }
+  const d = e.def;
+  return `${items.TIER_ICONS[d.tier]} ${d.emoji} **${d.name}** ×${e.qty}\n-# ${KIND_LABEL[d.kind]} · ${d.desc.slice(0, 220)}`;
+}
+
+// banner: tekst wyniku ostatniej akcji (albo null); page: numer strony (od 0); disabled: wyłącza przyciski po czasie
+async function buildView(guildId, user, { banner = null, page = 0, disabled = false } = {}) {
   const [inventory, boosts, armed, luck] = await Promise.all([
     inv.getInventory(guildId, user.id),
     inv.getBoosts(guildId, user.id),
@@ -24,16 +69,10 @@ async function buildView(guildId, user, banner) {
     inv.getLuck(guildId, user.id),
   ]);
 
-  const chestRows = inventory.filter((i) => items.isChest(i.itemId));
-  const itemRows = inventory
-    .filter((i) => !items.isChest(i.itemId) && items.ITEMS[i.itemId])
-    .sort((a, b) => items.ITEMS[b.itemId].tier - items.ITEMS[a.itemId].tier);
-
-  const chestLines = chestRows.map((r) => `${items.CHESTS[r.itemId].emoji} **${items.CHESTS[r.itemId].name}** ×${r.quantity}`);
-  const itemLines = itemRows.map((r) => {
-    const d = items.ITEMS[r.itemId];
-    return `${items.TIER_ICONS[d.tier]} ${d.emoji} **${d.name}** ×${r.quantity} · ${KIND_TAG[d.kind]}`;
-  });
+  const { entries, collection } = collectEntries(inventory);
+  const pages = Math.max(1, Math.ceil(entries.length / ROWS_PER_PAGE));
+  const current = Math.min(Math.max(page, 0), pages - 1);
+  const slice = entries.slice(current * ROWS_PER_PAGE, (current + 1) * ROWS_PER_PAGE);
 
   const active = [];
   for (const b of boosts) active.push(`🍀 Szczęście (${b.family}): +${b.value}% · jeszcze ok. ${minutesLeft(b.expiresAt)} min`);
@@ -42,36 +81,57 @@ async function buildView(guildId, user, banner) {
   if (armed.daily_item) active.push('⏰ Budzik: następna dzienna skrzynia ma większą szansę na przedmiot');
   if (armed.polisa) { const d = items.ITEMS[armed.polisa]; active.push(`${d.emoji} ${d.name}: zadziała w następnej grze w kasynie`); }
 
-  const main = new EmbedBuilder()
-    .setColor(0xd4af37)
-    .setAuthor({ name: `Ekwipunek: ${nameOf(user)}`, iconURL: user.displayAvatarURL?.() })
-    .addFields(
-      { name: '📦 Skrzynie', value: chestLines.join('\n') || '_Brak. Kupisz je w `/sklep`._' },
-      { name: '🎁 Przedmioty', value: itemLines.join('\n') || '_Pusto. Odbierz `/nagroda` albo otwórz skrzynię!_' },
-    )
-    .setFooter({ text: 'J = jednorazowy · S = stały · K = kolekcjonerski' });
-  if (active.length) main.addFields({ name: '✨ Aktywne', value: active.join('\n') });
+  const container = new ContainerBuilder().setAccentColor(0xd4af37);
 
-  // Menu: skrzynie najpierw, potem przedmioty od najwyższego poziomu (limit Discorda: 25 pozycji)
-  const options = [
-    ...chestRows.map((r) => {
-      const c = items.CHESTS[r.itemId];
-      return { label: `Otwórz: ${c.name} ×${r.quantity}`.slice(0, 100), value: c.id, emoji: c.emoji, description: 'Wybierzesz jedną z trzech skrzyń (publicznie na kanale).' };
-    }),
-    ...itemRows.filter((r) => items.ITEMS[r.itemId].kind !== 'collectible').map((r) => {
-      const d = items.ITEMS[r.itemId];
-      return { label: `Użyj: ${d.name} ×${r.quantity}`.slice(0, 100), value: d.id, emoji: d.emoji, description: d.desc.slice(0, 100) };
-    }),
-  ].slice(0, 25);
+  if (banner) {
+    container.addTextDisplayComponents(new TextDisplayBuilder().setContent(banner));
+    container.addSeparatorComponents(small());
+  }
 
-  const components = options.length
-    ? [new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId(MENU_ID).setPlaceholder('Użyj przedmiotu albo otwórz skrzynię...').addOptions(options))]
-    : [];
+  container.addTextDisplayComponents(new TextDisplayBuilder().setContent(`## 🎒 Ekwipunek: ${nameOf(user)}`));
 
-  const embeds = [];
-  if (banner) embeds.push(banner);
-  embeds.push(main);
-  return { embeds, components };
+  if (active.length) {
+    container.addTextDisplayComponents(new TextDisplayBuilder().setContent(`**✨ Aktywne**\n${active.join('\n')}`));
+  }
+
+  container.addSeparatorComponents(small());
+
+  if (entries.length === 0) {
+    container.addTextDisplayComponents(new TextDisplayBuilder().setContent('_Pusto. Odbierz `/nagroda` albo kup skrzynię w `/sklep`._'));
+  } else {
+    for (const e of slice) {
+      const button = e.type === 'chest'
+        ? new ButtonBuilder().setCustomId(`${OPEN_PREFIX}${e.def.id}`).setStyle(ButtonStyle.Primary).setLabel('Otwórz').setEmoji('📦')
+        : isMoneyItem(e.def)
+          ? new ButtonBuilder().setCustomId(`${USE_PREFIX}${e.def.id}`).setStyle(ButtonStyle.Primary).setLabel('Otwórz').setEmoji('📦')
+          : new ButtonBuilder().setCustomId(`${USE_PREFIX}${e.def.id}`).setStyle(ButtonStyle.Success).setLabel('Użyj').setEmoji('✨');
+      container.addSectionComponents(
+        new SectionBuilder()
+          .addTextDisplayComponents(new TextDisplayBuilder().setContent(entryText(e)))
+          .setButtonAccessory(button.setDisabled(disabled)),
+      );
+    }
+  }
+
+  if (collection.length) {
+    container.addSeparatorComponents(small());
+    container.addTextDisplayComponents(new TextDisplayBuilder().setContent(
+      `**🏆 Kolekcja**\n${collection.map((d) => `${items.TIER_ICONS[d.tier]} ${d.emoji} ${d.name}`).join('\n')}`,
+    ));
+  }
+
+  if (pages > 1) {
+    container.addSeparatorComponents(small());
+    container.addActionRowComponents(
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(PREV_ID).setStyle(ButtonStyle.Secondary).setLabel('Poprzednia').setEmoji('⬅️').setDisabled(disabled || current === 0),
+        new ButtonBuilder().setCustomId(PAGE_ID).setStyle(ButtonStyle.Secondary).setLabel(`${current + 1}/${pages}`).setDisabled(true),
+        new ButtonBuilder().setCustomId(NEXT_ID).setStyle(ButtonStyle.Secondary).setLabel('Następna').setEmoji('➡️').setDisabled(disabled || current >= pages - 1),
+      ),
+    );
+  }
+
+  return { components: [container], flags: V2, page: current };
 }
 
 module.exports = {
@@ -82,81 +142,142 @@ module.exports = {
   async execute(interaction) {
     const guildId = interaction.guild.id;
     const user = interaction.user;
+    let page = 0;
 
-    await interaction.reply({ ...(await buildView(guildId, user, null)), flags: MessageFlags.Ephemeral });
+    const first = await buildView(guildId, user, { page });
+    await interaction.reply({ components: first.components, flags: V2 | MessageFlags.Ephemeral });
     const message = await interaction.fetchReply();
 
+    // buildView zwraca też numer strony po przycięciu (np. gdy ostatnia pozycja zniknęła)
+    const render = async (opts = {}) => {
+      const view = await buildView(guildId, user, { page, ...opts });
+      page = view.page;
+      return { components: view.components, flags: V2 };
+    };
+
     const collector = message.createMessageComponentCollector({
-      componentType: ComponentType.StringSelect,
-      filter: (i) => i.user.id === user.id && i.customId === MENU_ID,
+      componentType: ComponentType.Button,
+      filter: (i) => i.user.id === user.id && i.customId.startsWith('inv_'),
       time: 5 * 60_000,
     });
 
     let busy = false; // jedna akcja naraz, żeby szybkie klikanie niczego nie dublowało
-    collector.on('collect', async (sel) => {
-      await sel.deferUpdate().catch(() => null);
+    collector.on('collect', async (i) => {
+      await i.deferUpdate().catch(() => null);
       if (busy) return;
       busy = true;
       try {
-        const itemId = sel.values[0];
-        let banner;
+        let banner = null;
 
-        if (items.isChest(itemId)) {
-          banner = await openChest(interaction, guildId, user, items.CHESTS[itemId]);
-        } else {
-          const res = await useItem(guildId, user.id, itemId);
-          banner = res.ok
-            ? new EmbedBuilder().setColor(res.color).setTitle(res.title).setDescription(res.lines.join('\n'))
-            : new EmbedBuilder().setColor(0xe74c3c).setTitle('❌ Nie udało się').setDescription(res.message);
+        if (i.customId === PREV_ID) page -= 1;
+        else if (i.customId === NEXT_ID) page += 1;
+        else if (i.customId.startsWith(OPEN_PREFIX)) {
+          const chest = items.CHESTS[i.customId.slice(OPEN_PREFIX.length)];
+          banner = chest ? await openChest(interaction, guildId, user, chest) : '❌ **Nie ma takiej skrzyni**';
+        } else if (i.customId.startsWith(USE_PREFIX)) {
+          const itemId = i.customId.slice(USE_PREFIX.length);
+          if (isMoneyItem(items.ITEMS[itemId])) {
+            banner = await openMoneyItem(interaction, guildId, user, items.ITEMS[itemId]);
+          } else {
+            const res = await useItem(guildId, user.id, itemId);
+            banner = res.ok ? `**${res.title}**\n${res.lines.join('\n')}` : `❌ **Nie udało się**\n${res.message}`;
+          }
         }
-        await interaction.editReply(await buildView(guildId, user, banner));
+
+        await interaction.editReply(await render({ banner }));
       } catch (err) {
         console.error('Błąd w /ekwipunek:', err);
-        await interaction.editReply(await buildView(guildId, user, new EmbedBuilder().setColor(0xe74c3c).setTitle('❌ Coś poszło nie tak').setDescription('Spróbuj ponownie za chwilę. Nic nie zostało zużyte.'))).catch(() => null);
+        await interaction.editReply(await render({ banner: '❌ **Coś poszło nie tak**\nSpróbuj ponownie za chwilę. Nic nie zostało zużyte.' })).catch(() => null);
       } finally {
         busy = false;
       }
     });
 
+    // Po 5 minutach przyciski się wyłączają (wiadomość V2 nie może zostać bez komponentów)
     collector.on('end', async () => {
-      await interaction.editReply({ components: [] }).catch(() => null);
+      await interaction.editReply(await render({ disabled: true })).catch(() => null);
     });
   },
 };
 
-// Otwarcie kupionej skrzyni: publiczna gra "trzy skrzynie" na kanale
+const sendToChannel = (interaction) => (payload) => interaction.channel.send(payload);
+const CHANNEL_ERROR = '❌ **Nie mogę wysłać wiadomości na tym kanale**\nSprawdź uprawnienia bota. Nic nie zostało zużyte.';
+const doneBanner = (emoji, name, res) => (res.ok
+  ? `${emoji} **Otwarto: ${name}**\nWynik jest na kanale.`
+  : `❌ **Nie udało się**\n${res.message}`);
+
+// Otwarcie kupionej skrzyni: "Otwieranie: <nazwa>", po chwili publicznie na kanale pokazuje się zawartość (bez wyboru).
+// Zwraca tekst banera.
 async function openChest(interaction, guildId, user, chest) {
   const have = (await inv.getInventory(guildId, user.id)).find((r) => r.itemId === chest.id);
-  if (!have) return new EmbedBuilder().setColor(0xe74c3c).setTitle('❌ Nie masz już tej skrzyni');
+  if (!have) return '❌ **Nie masz już tej skrzyni**';
 
   const [luck, owned] = await Promise.all([inv.getLuck(guildId, user.id), inv.getOwnedUnique(guildId, user.id)]);
-  const color = DAILY_TIERS[chest.tier].color;
-  const chests = [0, 1, 2].map(() => {
-    const r = items.rollChestContents(chest, luck, owned);
-    return { coins: r.coins, item: r.item, score: r.coins + (r.item ? r.item.value : 0), label: '', color };
-  });
+  const rolled = items.rollChestContents(chest, luck, owned); // { coins, item }
 
+  let res;
   try {
-    await runChestGame({
-      send: (payload) => interaction.channel.send(payload),
+    res = await runOpening({
+      send: sendToChannel(interaction),
       user,
-      chests,
-      modifier: null,
-      luck,
-      title: `${chest.emoji} ${chest.name}`,
-      pickTimeMs: PICK_TIME_MS,
+      emoji: chest.emoji,
+      name: chest.name,
       openDelayMs: OPEN_DELAY_MS,
-      quip: () => TIER_QUIPS[chest.tier] ?? '',
-      settle: async (selected) => {
-        const c = chests[selected];
-        const res = await inv.settleChestOpen(guildId, user.id, chest.id, c.coins, c.item ? [c.item.id] : []);
-        if (!res.ok) return { ok: false, message: '❌ Tej skrzyni już nie ma w Twoim ekwipunku.' };
-        return { ok: true, balance: res.balance, granted: res.granted };
+      settle: async () => {
+        const s = await inv.settleChestOpen(guildId, user.id, chest.id, rolled.coins, rolled.item ? [rolled.item.id] : []);
+        if (!s.ok) return { ok: false, message: '❌ Tej skrzyni już nie ma w Twoim ekwipunku.' };
+
+        const lines = [];
+        if (rolled.coins > 0) lines.push(`Zyskujesz: ${formatCoins(rolled.coins)}`);
+        if (rolled.item) {
+          lines.push(s.granted.includes(rolled.item.id)
+            ? `🎁 Do ekwipunku: ${rolled.item.emoji} **${rolled.item.name}**`
+            : `ℹ️ ${rolled.item.name}: już to masz (stały przedmiot, pominięty).`);
+        }
+        if (!rolled.coins && !rolled.item) lines.push('W środku pusto.');
+        if (rolled.coins > 0) lines.push(`Saldo: ${formatCoins(s.balance)}`);
+
+        return {
+          ok: true,
+          title: `🎁 Otwarto: ${chest.name}`,
+          color: DAILY_TIERS[chest.tier].color,
+          lines,
+          quip: TIER_QUIPS[rolled.item ? rolled.item.tier : chest.tier] ?? '', // komentarz zależy od tego, co wypadło
+        };
       },
     });
   } catch (err) {
     console.error('Nie udało się wysłać skrzyni na kanał:', err.message);
-    return new EmbedBuilder().setColor(0xe74c3c).setTitle('❌ Nie mogę wysłać wiadomości na tym kanale').setDescription('Sprawdź uprawnienia bota. Skrzynia nie została zużyta.');
+    return CHANNEL_ERROR;
   }
-  return new EmbedBuilder().setColor(0x2ecc71).setTitle(`${chest.emoji} Skrzynie czekają na kanale`).setDescription('Wybierz jedną z trzech w publicznej wiadomości. Skrzynia zużyje się dopiero po wyborze.');
+  return doneBanner(chest.emoji, chest.name, res);
+}
+
+// Przedmiot "pieniężny" (np. Kufer Boba): to samo otwieranie co skrzynia; wynik (nic / suma / mandat) liczy useItem.
+async function openMoneyItem(interaction, guildId, user, def) {
+  let res;
+  try {
+    res = await runOpening({
+      send: sendToChannel(interaction),
+      user,
+      emoji: def.emoji,
+      name: def.name,
+      openDelayMs: OPEN_DELAY_MS,
+      settle: async () => {
+        const used = await useItem(guildId, user.id, def.id);
+        if (!used.ok) return { ok: false, message: `❌ ${used.message}` };
+        return {
+          ok: true,
+          title: `🎁 Otwarto: ${def.name}`,
+          color: used.color,
+          lines: used.lines,
+          quip: used.color === GAIN_COLOR ? TIER_QUIPS[def.tier] ?? '' : '', // komentarz Boba tylko przy wygranej
+        };
+      },
+    });
+  } catch (err) {
+    console.error('Nie udało się wysłać wiadomości na kanał:', err.message);
+    return CHANNEL_ERROR;
+  }
+  return doneBanner(def.emoji, def.name, res);
 }

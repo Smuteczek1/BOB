@@ -167,17 +167,40 @@ const ITEMS = {
   },
 };
 
-// ---------------- SKRZYNIE DO KUPIENIA ----------------
-// coins = [min, max] (losowanie równomierne), itemChance = szansa na przedmiot w KAŻDEJ z trzech skrzyń
+// ---------------- SKRZYNIE DO KUPIENIA (SKLEP) ----------------
+// Sklep ma 3 skrzynie. Każda ma WIDOCZNĄ listę poziomów rzadkości, które mogą w niej wypaść:
+//   tiers = [[poziom, waga], ...]  poziom 0-6 (0 Pospolita ... 6 Void); waga względna = szansa poziomu
+//   Konkretny przedmiot jest losowany wśród przedmiotów wylosowanego poziomu (wagi `weight` w ITEMS).
+//   Skrzynie mogą się na siebie nakładać (ten sam poziom w dwóch skrzyniach), ale niska nie dostaje wysokich.
+//   coins = null (skrzynie ze sklepu nie dają monet), itemChance 1.0 = zawsze wypada przedmiot
+//   tier (pojedynczy) = tylko wygląd/komentarz Boba
 const CHESTS = {
-  chest_pospolita:  { id: 'chest_pospolita',  name: 'Skrzynia Pospolita',  emoji: '⚪', tier: 0, price: 360,    coins: [100, 400],     itemChance: 0.15 },
-  chest_niezwykla:  { id: 'chest_niezwykla',  name: 'Skrzynia Niezwykła',  emoji: '🟢', tier: 1, price: 900,    coins: [250, 950],     itemChance: 0.35 },
-  chest_rzadka:     { id: 'chest_rzadka',     name: 'Skrzynia Rzadka',     emoji: '🔵', tier: 2, price: 2400,   coins: [600, 2400],    itemChance: 0.50 },
-  chest_legendarna: { id: 'chest_legendarna', name: 'Skrzynia Legendarna', emoji: '🟣', tier: 3, price: 6900,   coins: [1500, 5500],   itemChance: 0.70 },
-  chest_mityczna:   { id: 'chest_mityczna',   name: 'Skrzynia Mityczna',   emoji: '🟠', tier: 4, price: 20000,  coins: [3500, 12500],  itemChance: 0.85 },
-  chest_boska:      { id: 'chest_boska',      name: 'Skrzynia Boska',      emoji: '🔴', tier: 5, price: 50000,  coins: [9000, 31000],  itemChance: 1.0 },
-  chest_void:       { id: 'chest_void',       name: 'Skrzynia Void',       emoji: '⚫', tier: 6, price: 125000, coins: [22000, 78000], itemChance: 1.0 },
-  chest_skrytka:    { id: 'chest_skrytka',    name: 'Skrytka Boba',        emoji: '📦', tier: 2, price: 860,    coins: null,           itemChance: 1.0, itemOnly: true },
+  chest_braz: {
+    id: 'chest_braz', name: 'Skrzynia Brązowa', emoji: '🟤', tier: 1, price: 320,
+    coins: null, itemChance: 1.0,
+    tiers: [[0, 50], [1, 40], [2, 10]],
+  },
+  chest_srebrna: {
+    id: 'chest_srebrna', name: 'Skrzynia Srebrna', emoji: '⚪', tier: 3, price: 2300,
+    coins: null, itemChance: 1.0,
+    tiers: [[1, 15], [2, 45], [3, 35], [4, 5]],
+  },
+  chest_zlota: {
+    id: 'chest_zlota', name: 'Skrzynia Złota', emoji: '🟡', tier: 5, price: 21000,
+    coins: null, itemChance: 1.0,
+    tiers: [[3, 10], [4, 50], [5, 30], [6, 10]],
+  },
+
+  // ---- STARE SKRZYNIE (legacy): już niedostępne w sklepie, ale kto je ma w ekwipunku, nadal je otworzy.
+  // Gdy nikt już ich nie posiada, możesz usunąć cały ten fragment.
+  chest_pospolita:  { id: 'chest_pospolita',  name: 'Skrzynia Pospolita',  emoji: '⚪', legacy: true, tier: 0, price: 360,    coins: [100, 400],     itemChance: 0.15 },
+  chest_niezwykla:  { id: 'chest_niezwykla',  name: 'Skrzynia Niezwykła',  emoji: '🟢', legacy: true, tier: 1, price: 900,    coins: [250, 950],     itemChance: 0.35 },
+  chest_rzadka:     { id: 'chest_rzadka',     name: 'Skrzynia Rzadka',     emoji: '🔵', legacy: true, tier: 2, price: 2400,   coins: [600, 2400],    itemChance: 0.50 },
+  chest_legendarna: { id: 'chest_legendarna', name: 'Skrzynia Legendarna', emoji: '🟣', legacy: true, tier: 3, price: 6900,   coins: [1500, 5500],   itemChance: 0.70 },
+  chest_mityczna:   { id: 'chest_mityczna',   name: 'Skrzynia Mityczna',   emoji: '🟠', legacy: true, tier: 4, price: 20000,  coins: [3500, 12500],  itemChance: 0.85 },
+  chest_boska:      { id: 'chest_boska',      name: 'Skrzynia Boska',      emoji: '🔴', legacy: true, tier: 5, price: 50000,  coins: [9000, 31000],  itemChance: 1.0 },
+  chest_void:       { id: 'chest_void',       name: 'Skrzynia Void',       emoji: '⚫', legacy: true, tier: 6, price: 125000, coins: [22000, 78000], itemChance: 1.0 },
+  chest_skrytka:    { id: 'chest_skrytka',    name: 'Skrytka Boba',        emoji: '📦', legacy: true, tier: 2, price: 860,    coins: null,           itemChance: 1.0, itemOnly: true },
 };
 
 // Szczęście: rodziny nie sumują się same ze sobą (działa najsilniejsza z rodziny), różne rodziny się sumują.
@@ -254,13 +277,50 @@ function dropDailyItem(owned = new Set()) {
   return pickItemFromTier(tier, owned) ?? pickItemFromTier(0, owned);
 }
 
-// Zawartość jednej skrzyni kupionej w sklepie
+// Losowanie przedmiotu ze skrzyni: najpierw poziom (wg wag skrzyni), potem przedmiot z tego poziomu.
+// Unikalne, które już masz, są pomijane; gdy poziom się wyczerpie, losujemy z pozostałych poziomów skrzyni.
+function pickFromTiers(chest, owned = new Set()) {
+  const entries = chest.tiers.map(([tier, weight]) => ({ tier, weight }));
+  const first = weightedPick(entries);
+  const ordered = first ? [first, ...entries.filter((e) => e !== first)] : entries;
+  for (const e of ordered) {
+    const item = pickItemFromTier(e.tier, owned);
+    if (item) return item;
+  }
+  return null;
+}
+
+// Procentowe szanse poziomów w skrzyni (do wyświetlania w sklepie), od najniższego poziomu
+function tierOdds(chest) {
+  const total = chest.tiers.reduce((s, [, w]) => s + w, 0);
+  return chest.tiers.map(([tier, w]) => ({ tier, pct: (w / total) * 100 })).sort((a, b) => a.tier - b.tier);
+}
+
+// Średnia wartość przedmiotu ze skrzyni (do ustalania ceny: sklep ma zwracać ok. 75%)
+function expectedItemValue(chest) {
+  const total = chest.tiers.reduce((s, [, w]) => s + w, 0);
+  let ev = 0;
+  for (const [tier, w] of chest.tiers) {
+    const pool = Object.values(ITEMS).filter((i) => i.tier === tier && i.weight > 0);
+    const tw = pool.reduce((x, i) => x + i.weight, 0);
+    if (tw > 0) ev += (w / total) * (pool.reduce((x, i) => x + i.weight * i.value, 0) / tw);
+  }
+  return ev;
+}
+
+// Zawartość jednej skrzyni (kupionej w sklepie)
 function rollChestContents(chest, luck = 0, owned = new Set()) {
   const coins = chest.coins
     ? luckyPick(() => randomInt(chest.coins[0], chest.coins[1] + 1), (x) => x, luck)
     : 0;
   const p = Math.min(1, chest.itemChance * (1 + luck / 100));
-  const item = chance(p) ? dropItem(chest.tier, owned) : null;
+  let item = null;
+  if (chance(p)) {
+    // Szczęście: z szansą równą szczęściu losujemy dwa razy i bierzemy cenniejszy przedmiot
+    item = chest.tiers
+      ? luckyPick(() => pickFromTiers(chest, owned), (it) => (it ? it.value : 0), luck)
+      : dropItem(chest.tier, owned);
+  }
   return { coins, item };
 }
 
@@ -293,5 +353,5 @@ module.exports = {
   TIER_NAMES, TIER_ICONS, ITEMS, CHESTS,
   LUCK_CAP, LUCK_COMBO_BONUS, DAILY_ITEM_CHANCE, DAILY_ITEM_CHANCE_BUDZIK,
   chance, isChest, getDef, computeLuck, luckyPick, dropItem, dropDailyItem,
-  rollChestContents, rollMoneyOnce, rollMoney, moneyScore, warsawDate,
+  rollChestContents, pickFromTiers, tierOdds, expectedItemValue, rollMoneyOnce, rollMoney, moneyScore, warsawDate,
 };

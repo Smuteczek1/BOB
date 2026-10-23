@@ -95,7 +95,7 @@ npm start
 | `/portfel [uzytkownik]` | Pokazuje saldo monet, zarobione łącznie i (dla Ciebie) ostatnie operacje | Wszyscy |
 | `/nagroda` | Dzienna nagroda: wybierasz jedną z trzech skrzyń (reset o północy, czas polski) | Wszyscy |
 | `/sklep` | Sklep Boba: kup skrzynię (przedmioty wypadają tylko ze skrzyń) | Wszyscy |
-| `/ekwipunek` | Twoje przedmioty i skrzynie; stąd je używasz i otwierasz | Wszyscy |
+| `/ekwipunek` | Twoje przedmioty i skrzynie; przy każdej pozycji przycisk Otwórz/Użyj (lista dzieli się na strony) | Wszyscy |
 | `/cclear kanal ilosc:<liczba/all> [uzytkownik]` | Usuwa wiadomości z bieżącego kanału | Zarządzanie wiadomościami |
 | `/cclear uzytkownik uzytkownik:<user> okres:<...>` | Usuwa wiadomości danego użytkownika ze WSZYSTKICH kanałów, z ostatnich X godzin | Zarządzanie wiadomościami |
 | `/rola-poziom ustaw poziom:<n> rola:<rola>` | Przypisuje rolę do poziomu (0 = od dołączenia) | Zarządzanie rolami |
@@ -187,10 +187,9 @@ Poziomy i drabinka ról na razie działają jak dotąd, równolegle do monet.
 
 ### Jak działa sklep i ekwipunek
 
-**Skrzynie:** w `/sklep` kupujesz skrzynie na 7 poziomach (Pospolita ... Void) oraz Skrytkę Boba (tylko przedmiot).
-Przedmioty **nie są na sprzedaż**: wypadają ze skrzyń (kupionych i z 20% szansą w dziennej) i z innych przedmiotów (bonusy).
-Skrzynię otwierasz w `/ekwipunek`: wybierasz jedną z trzech (publicznie na kanale), a zużywa się dopiero po wyborze.
-Każda kupiona skrzynia zwraca średnio ok. 75% swojej ceny, więc sklep działa jak zlew monet.
+**Skrzynie:** w `/sklep` są **3 skrzynie**: 🟤 Brązowa, ⚪ Srebrna i 🟡 Złota. Każda ma własną, **widoczną w sklepie listę poziomów rzadkości** (z procentowymi szansami; skrzynie lekko się nakładają, ale Brązowa nie dostaje wysokich poziomów), **100% szansy na przedmiot** (skrzynie ze sklepu nie dają monet). Przedmioty **nie są na sprzedaż**: wypadają ze skrzyń (kupionych i z 20% szansą w dziennej) i z innych przedmiotów (bonusy). Skrzynię otwierasz w `/ekwipunek` przyciskiem **Otwórz**: na kanale pokazuje się "Otwieranie: nazwa skrzyni", a po chwili to, co było w środku (bez wyboru). Tak samo otwierają się przedmioty "pieniężne" (Teczka ... Czarna Skrzynka, np. Kufer Boba: nic, suma albo mandat). Wybór jednej z trzech skrzyń został tylko w dziennej nagrodzie `/nagroda`. Każda kupiona skrzynia zwraca średnio ok. 75% swojej ceny, więc sklep działa jak zlew monet. Stare skrzynie (Pospolita ... Void i Skrytka Boba) są oznaczone `legacy`: nie ma ich w sklepie, ale kto je już ma, nadal je otworzy.
+
+**Zmiana zawartości skrzyni:** w `utils/items.js`, obiekt `CHESTS`, pole `tiers` (`[poziom, waga]`, poziomy 0-6). Większa waga = częściej wypada ten poziom; sklep sam przelicza procenty. Konkretny przedmiot jest losowany wśród przedmiotów danego poziomu (pole `weight` w `ITEMS`). Do wyliczenia ceny na ok. 75% zwrotu służy `expectedItemValue(chest)`.
 
 **Katalog w jednym pliku:** `utils/items.js` zawiera wszystkie przedmioty, skrzynie, ceny, szanse, wagi i bonusy.
 Dla przedmiotów niepieniężnych pole `value` to tylko szacunek (do liczenia cen i oceny "najgorszej skrzyni").
