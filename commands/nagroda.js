@@ -1,100 +1,81 @@
-const { SlashCommandBuilder, EmbedBuilder, MessageFlags } = require('discord.js');
+const { SlashCommandBuilder, MessageFlags } = require('discord.js');
 const db = require('../db');
-const { levelForXp } = require('../utils/leveling');
-const { syncLevelRole } = require('../utils/levelRoles');
+const inv = require('../utils/inventory');
+const items = require('../utils/items');
+const { rollDailyReward, DAILY_TIERS } = require('../utils/economy');
+const { runChestGame, TIER_QUIPS } = require('../utils/chestGame');
+
+// Czas na wybór skrzyni i długość etapu "otwieranie" (.env: CHEST_PICK_TIME_MS / CHEST_FRAME_DELAY_MS)
+const PICK_TIME_MS = Number(process.env.CHEST_PICK_TIME_MS ?? 60_000);
+const OPEN_DELAY_MS = Number(process.env.CHEST_FRAME_DELAY_MS ?? 2000);
 
 module.exports = {
   data: new SlashCommandBuilder()
-    .setName('nagroda') // <-- Zmiana komendy na /nagroda
-    .setDescription('Odbierz swoją dzienną nagrodę XP (reset o północy)!'),
+    .setName('nagroda')
+    .setDescription('Odbierz dzienną nagrodę: wybierz jedną z trzech skrzyń (reset o północy, czas polski)!'),
 
   async execute(interaction) {
-    const userId = interaction.user.id;
     const guildId = interaction.guild.id;
+    const user = interaction.user;
 
-    // 1. Sprawdzenie możliwości odbioru dzisiaj
-    const canClaim = await db.canClaimDaily(guildId, userId);
-    if (!canClaim) {
+    // Szybkie sprawdzenie na starcie (prawdziwe, atomowe sprawdzenie następuje w bazie przy wyborze)
+    if (!(await db.canClaimDaily(guildId, user.id))) {
       await interaction.reply({
-        content: '⏰ Odebrałeś/aś już dzisiejszą nagrodę! Wróć po północy (00:00).',
+        content: '⏰ Odebrałeś/aś już dzisiejszą skrzynię! Wróć po północy (00:00).',
         flags: MessageFlags.Ephemeral,
       });
       return;
     }
 
-    // 2. Losowanie skrzyni i nagrody XP
-    const roll = Math.random();
-    let tier = '';
-    let color = 0x000000;
-    let minXp = 0;
-    let maxXp = 0;
+    const [luck, armed, owned] = await Promise.all([
+      inv.getLuck(guildId, user.id),
+      inv.getArmed(guildId, user.id),
+      inv.getOwnedUnique(guildId, user.id),
+    ]);
 
-                    // 35,0%
-    if (roll < 0.35) {
-      tier = '⚪ Pospolita Skrzynia';
-      color = 0x95a5a6;
-      minXp = 50;
-      maxXp = 100;
-                          // 28,0%
-    } else if (roll < 0.63) {
-      tier = '🟢 Niezwykła Skrzynia';
-      color = 0x2ecc71;
-      minXp = 101;
-      maxXp = 200;
-                          // 19,0%
-    } else if (roll < 0.82) {
-      tier = '🔵 Rzadka Skrzynia';
-      color = 0x3498db;
-      minXp = 201;
-      maxXp = 350;
-                          // 10,0%
-    } else if (roll < 0.92) {
-      tier = '🟣 Legendarna Skrzynia';
-      color = 0x9b59b6;
-      minXp = 351;
-      maxXp = 600;
-                          // 5,5%
-    } else if (roll < 0.975) {
-      tier = '🟠 Mityczna Skrzynia!';
-      color = 0xe67e22;
-      minXp = 601;
-      maxXp = 1200;
-                          // 2,0%
-    } else if (roll < 0.995) {
-      tier = '🔴 Boska Skrzynia!!';
-      color = 0xe74c3c;
-      minXp = 1201;
-      maxXp = 2200;
-                          // 0,5%
-    } else {
-      tier = '⚫ VOID SKRZYNIA!!!';
-      color = 0x1a1a2e;
-      minXp = 3000;
-      maxXp = 6000;
-    }
+    // Jeden modyfikator skrzyni na odbiór: Latarka albo Zapasowy klucz
+    const modifier = armed.daily_mod === 'latarka' ? 'latarka' : armed.daily_mod === 'klucz' ? 'klucz' : null;
+    const itemChance = armed.daily_item ? items.DAILY_ITEM_CHANCE_BUDZIK : items.DAILY_ITEM_CHANCE;
 
-    const rewardXp = Math.floor(Math.random() * (maxXp - minXp + 1)) + minXp;
+    // Zawartość wszystkich trzech skrzyń losujemy z góry (kryptograficznym RNG).
+    // Skrzynie są niezależne i takie same, więc wybór skrzyni nie zmienia średniej nagrody.
+    const makeChest = () => {
+      const reward = items.luckyPick(rollDailyReward, (r) => r.amount, luck);
+      const hasItem = items.chance(Math.min(1, itemChance * (1 + luck / 100)));
+      const item = hasItem ? items.dropDailyItem(owned) : null;
+      return {
+        coins: reward.amount,
+        item,
+        score: reward.amount + (item ? item.value : 0),
+        label: reward.tier.name,
+        color: reward.tier.color,
+        tierIndex: DAILY_TIERS.indexOf(reward.tier),
+      };
+    };
+    const chests = [makeChest(), makeChest(), makeChest()];
 
-    // 3. Zapis w bazie danych i dodanie XP
-    await db.setDailyClaimed(guildId, userId);
-    const { oldLevel, newLevel } = await db.addXp(guildId, userId, rewardXp, 'daily', levelForXp);
+    const consumeKinds = [];
+    if (modifier) consumeKinds.push('daily_mod');
+    if (armed.daily_item) consumeKinds.push('daily_item');
 
-    if (newLevel > oldLevel) {
-      await syncLevelRole(interaction.client, guildId, userId, newLevel);
-    }
-
-    // 4. Odpowiedź na Discordzie
-    const embed = new EmbedBuilder()
-      .setTitle('🎁 Dzienny Prezent Odbierania XP')
-      .setColor(color)
-      .setDescription(
-        `Udało Ci się wyciągnąć: **${tier}**!\n\n` +
-        `✨ Twoja nagroda: **+${rewardXp} XP**\n` +
-        (newLevel > oldLevel ? `🎉 **AWANS! Osiągnięto poziom ${newLevel}!**` : `Poziom: **${newLevel}**`)
-      )
-      .setFooter({ text: 'Możesz odebrać kolejną skrzynkę jutro po 00:00!' })
-      .setTimestamp();
-
-    await interaction.reply({ embeds: [embed] });
+    await runChestGame({
+      send: async (payload) => { await interaction.reply(payload); return interaction.fetchReply(); },
+      edit: (payload) => interaction.editReply(payload),
+      user,
+      chests,
+      modifier,
+      luck,
+      title: '🎁 Dzienna skrzynia',
+      pickTimeMs: PICK_TIME_MS,
+      openDelayMs: OPEN_DELAY_MS,
+      quip: (chest) => TIER_QUIPS[chest.tierIndex] ?? '',
+      settle: async (selected, extra) => {
+        const coins = chests[selected].coins + (extra !== null ? chests[extra].coins : 0);
+        const itemIds = [chests[selected].item, extra !== null ? chests[extra].item : null].filter(Boolean).map((i) => i.id);
+        const result = await inv.claimDailyBundle(guildId, user.id, coins, itemIds, consumeKinds);
+        if (!result.claimed) return { ok: false, message: '⏰ Dzisiejsza nagroda została już odebrana. Wróć po północy (00:00).' };
+        return { ok: true, balance: result.balance, granted: result.granted };
+      },
+    });
   },
 };

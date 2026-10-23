@@ -23,10 +23,8 @@ nadal będzie działać.
 
 ## Wymagania
 
-- **Node.js 22.5 lub nowszy** (sprawdź komendą `node -v`). Baza danych korzysta
-  z wbudowanego w Node modułu `node:sqlite`, więc **nie trzeba niczego
-  kompilować** (nie potrzebujesz Pythona, Visual Studio Build Tools itd.).
-  Jeśli masz starszego Node'a, pobierz aktualną wersję LTS z https://nodejs.org.
+- **Node.js 22.5 lub nowszy** (sprawdź komendą `node -v`). Jeśli masz starszego, pobierz aktualną wersję LTS z https://nodejs.org.
+- Baza **PostgreSQL** (np. darmowy projekt na Supabase) i jej adres w `DATABASE_URL`.
 - Aplikacja Discord Bot założona na https://discord.com/developers/applications
 
 ## Konfiguracja krok po kroku
@@ -92,6 +90,12 @@ npm start
 | `/rola-panel lista` | Pokazuje wszystkie panele ról na serwerze (z ID) | Zarządzanie rolami |
 | `/setup-poziomy [kategoria] [nazwa_kanalu]` | Tworzy kanał ogłaszający kamienie milowe poziomów | Zarządzanie serwerem |
 | `/poziom [uzytkownik]` | Pokazuje Twój (lub czyjś) aktualny poziom i XP | Wszyscy |
+| `/eksport-poziomow` | Wysyła plik CSV z XP i poziomami wszystkich (kopia zapasowa) | Administrator |
+| `/reset co:[monety/exp/ekwipunek/wszystko] [osoba]` | Zeruje monety i/lub EXP jednej osoby albo całego serwera (z podglądem, potwierdzeniem i kopią usuniętych danych) | Administrator |
+| `/portfel [uzytkownik]` | Pokazuje saldo monet, zarobione łącznie i (dla Ciebie) ostatnie operacje | Wszyscy |
+| `/nagroda` | Dzienna nagroda: wybierasz jedną z trzech skrzyń (reset o północy, czas polski) | Wszyscy |
+| `/sklep` | Sklep Boba: kup skrzynię (przedmioty wypadają tylko ze skrzyń) | Wszyscy |
+| `/ekwipunek` | Twoje przedmioty i skrzynie; stąd je używasz i otwierasz | Wszyscy |
 | `/cclear kanal ilosc:<liczba/all> [uzytkownik]` | Usuwa wiadomości z bieżącego kanału | Zarządzanie wiadomościami |
 | `/cclear uzytkownik uzytkownik:<user> okres:<...>` | Usuwa wiadomości danego użytkownika ze WSZYSTKICH kanałów, z ostatnich X godzin | Zarządzanie wiadomościami |
 | `/rola-poziom ustaw poziom:<n> rola:<rola>` | Przypisuje rolę do poziomu (0 = od dołączenia) | Zarządzanie rolami |
@@ -158,6 +162,72 @@ Listę kamieni milowych można zmienić w `utils/leveling.js` (stała `EXPLICIT_
 
 Komenda `/poziom` (bonus) pozwala każdemu sprawdzić swój aktualny postęp,
 mimo że nie każdy poziom jest ogłaszany publicznie.
+
+### Jak działa ekonomia (etap 1)
+
+Każdy użytkownik ma na serwerze **portfel z monetami**. Nazwę i emoji waluty zmieniasz w jednym
+miejscu: `utils/economy.js` (obiekt `CURRENCY`).
+
+**Skąd się biorą monety:** na razie tylko z `/nagroda` (dzienna skrzynia, 7 rzadkości; szanse i zakresy
+w `DAILY_TIERS` w `utils/economy.js`). Kolejne źródła (kasyno, projekty) dojdą w następnych etapach.
+**XP** nadal pochodzi wyłącznie z czatu i głosowego i nie ma z monetami nic wspólnego.
+
+**Animacja skrzyni:** `/nagroda` pokazuje publiczną grę: 3 skrzynie, wybierasz jedną przyciskiem (etap 1), skrzynia się otwiera (etap 2), a na końcu widać nagrodę i to, co było w pozostałych skrzyniach (etap 3), z komentarzem Boba. Dzienna nagroda zużywa się dopiero po wyborze, więc jeśli nie klikniesz, nic nie tracisz.
+Nagroda jest zapisywana w bazie od razu po wyborze, jeszcze przed odsłonięciem, więc nawet przerwana animacja nie gubi monet.
+Czas na wybór i długość etapu "otwieranie" zmienisz w `.env`: `CHEST_PICK_TIME_MS` (domyślnie 60000) i `CHEST_FRAME_DELAY_MS` (domyślnie 2000).
+
+**Bezpieczeństwo salda:** wszystkie zmiany idą przez funkcje w `db.js` (`addCoins`, `spendCoins`,
+`claimDailyCoins`), które działają atomowo, więc szybkie podwójne kliknięcie nie wyda tych samych monet
+ani nie da podwójnej nagrody. Saldo nie może zejść poniżej zera (ograniczenie w bazie).
+
+**Dziennik:** każda zmiana salda (nagrody, a w przyszłości zakupy i wygrane) zapisuje się w tabeli
+`economy_transactions`.
+
+Poziomy i drabinka ról na razie działają jak dotąd, równolegle do monet.
+
+### Jak działa sklep i ekwipunek
+
+**Skrzynie:** w `/sklep` kupujesz skrzynie na 7 poziomach (Pospolita ... Void) oraz Skrytkę Boba (tylko przedmiot).
+Przedmioty **nie są na sprzedaż**: wypadają ze skrzyń (kupionych i z 20% szansą w dziennej) i z innych przedmiotów (bonusy).
+Skrzynię otwierasz w `/ekwipunek`: wybierasz jedną z trzech (publicznie na kanale), a zużywa się dopiero po wyborze.
+Każda kupiona skrzynia zwraca średnio ok. 75% swojej ceny, więc sklep działa jak zlew monet.
+
+**Katalog w jednym pliku:** `utils/items.js` zawiera wszystkie przedmioty, skrzynie, ceny, szanse, wagi i bonusy.
+Dla przedmiotów niepieniężnych pole `value` to tylko szacunek (do liczenia cen i oceny "najgorszej skrzyni").
+
+**Typy przedmiotów:** jednorazowe (`J`), stałe (`S`, tylko Koniczyna i Podkowa, można mieć po jednym) i kolekcjonerskie (`K`).
+
+**Szczęście** (Koniczynka, Koniczyna, Podkowa): z szansą równą szczęściu losujesz dwa razy i bierzesz lepszy wynik.
+Ta sama rodzina się nie sumuje (działa najsilniejsza), różne się sumują, a Koniczyna razem z Podkową dają dodatkowe +2%.
+Górny limit to +15%. Szczęście **nie działa** w kasynie ani w loterii.
+
+**Modyfikatory dziennej skrzyni:** Latarka (najgorsza z trzech odpada) i Zapasowy klucz (otwierasz też lepszą z reszty).
+Jeden modyfikator na odbiór. Budzik Boba pozwala odebrać dzienną skrzynię drugi raz.
+
+**Przedmioty pieniężne** (Teczka ... Czarna Skrzynka): nic, suma albo mandat (10% salda, z limitem; nigdy poniżej zera).
+
+**Polisy** (Mała/Boba/Wielka): włączasz przed grą w kasynie; po przegranej jest szansa na zwrot straty do limitu.
+Zużywają się przy tej jednej grze, a zwrot jest liczony w tej samej transakcji co rozliczenie gry.
+
+**Bezpieczeństwo:** zakup, zużycie przedmiotu, wypłata i wpis w dzienniku zawsze dzieją się w jednej transakcji.
+Jeśli coś się nie uda (limit losów, brak środków, drugi modyfikator), transakcja jest cofana, a przedmiot nie ginie.
+
+**Wytrych** jest w katalogu, ale nie wypada ze skrzyń, dopóki nie będzie napadu (`weight: 0`).
+Kolory nicków dojdą później.
+
+### Jak działa /reset
+
+`/reset co:<monety | EXP i poziomy | wszystko> [osoba]`: zostaw `osoba` puste, żeby zresetować **cały serwer**.
+
+1. Bot najpierw pokazuje **podgląd** (ile osób i ile monet/XP zostanie dotkniętych). Nic jeszcze nie zmienia.
+2. Potwierdzasz przyciskiem. Przy resecie **całego serwera** trzeba dodatkowo wpisać słowo `RESET`.
+3. Wszystkie zmiany idą w **jednej transakcji** (albo wszystko, albo nic).
+4. Po resecie dostajesz **plik CSV z kopią** tego, co zostało usunięte. Reset monet zostawia też ślad w dzienniku (`economy_transactions`, powód `reset`).
+5. Po resecie EXP-a role za poziom wracają do najniższej (poziom 0). `last_daily_at` nie jest ruszane, więc reset nie pozwala odebrać dziennej skrzyni drugi raz.
+
+Reset nie dotyka statystyk czasu na kanałach głosowych (ranking rozmów).
+Gdy dojdzie nowa funkcja (np. ekwipunek ze sklepu), dopisz jej wpis w `RESET_TARGETS` w `db.js`
+oraz etykietę w `commands/reset.js`, a `/reset` obsłuży ją bez dalszych zmian.
 
 ### Jak działa /cclear
 
@@ -262,13 +332,9 @@ kanałów i podmieni konfigurację.
 
 ## Dane
 
-Statystyki są zapisywane lokalnie w pliku `data.sqlite` (SQLite przez wbudowany
-moduł `node:sqlite`, plik tworzony automatycznie przy pierwszym uruchomieniu).
-Jeśli hostujesz bota np. na VPS, pamiętaj żeby ten plik był w trwałym miejscu
-(nie kasowany przy redeployu). Przy starcie zobaczysz w konsoli komunikat
-`ExperimentalWarning: SQLite is an experimental feature` — to normalne,
-funkcja działa poprawnie, po prostu Node.js oznacza ją jeszcze jako
-eksperymentalną.
+Dane są przechowywane w bazie **PostgreSQL** (np. Supabase) pod adresem z zmiennej `DATABASE_URL`
+w pliku `.env`. Tabele tworzą się automatycznie przy starcie bota (`initDb` w `db.js`),
+a nowe kolumny dodawane są bezpiecznie (`IF NOT EXISTS`), więc aktualizacja nie kasuje danych.
 
 ## Wieloserwerowość
 

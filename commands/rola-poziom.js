@@ -88,9 +88,11 @@ async function handleList(interaction) {
   }
 
   // Formatowanie listy ról
-  const sorted = [...tiers].sort((a, b) => a.required_level - b.required_level);
+  // Kolumna w bazie nazywa się "level" (wcześniej kod czytał nieistniejące "required_level")
+  const getLvl = r => r.level ?? r.required_level ?? 0;
+  const sorted = [...tiers].sort((a, b) => getLvl(a) - getLvl(b));
   const listText = sorted
-    .map(r => `• **Poziom ${r.required_level}:** <@&${r.role_id}>`)
+    .map(r => `• **Poziom ${getLvl(r)}:** <@&${r.role_id}>`)
     .join('\n');
 
   const embed = new EmbedBuilder()

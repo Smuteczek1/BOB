@@ -36,7 +36,147 @@ async function queryMany(text, params) {
   return res.rows;
 }
 
+// Wykonuje kilka zapytań w jednej transakcji: albo przejdą wszystkie, albo żadne.
+// Używane tam, gdzie zmieniamy saldo i zapisujemy wpis w dzienniku jednocześnie.
+async function withTransaction(fn) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await fn(client);
+    await client.query('COMMIT');
+    return result;
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => null);
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+// Dopisuje monety na konto (tworzy konto, jeśli go nie ma) i opcjonalnie zapisuje wpis w dzienniku.
+// Zwraca nowe saldo jako liczbę.
+async function applyCredit(client, guildId, userId, amount, reason, ledger) {
+  const res = await client.query(`
+    INSERT INTO economy_accounts (guild_id, user_id, balance, total_earned, created_at)
+    VALUES ($1, $2, $3::bigint, $3::bigint, $4::bigint)
+    ON CONFLICT (guild_id, user_id) DO UPDATE
+      SET balance = economy_accounts.balance + $3::bigint,
+          total_earned = economy_accounts.total_earned + $3::bigint
+    RETURNING balance
+  `, [guildId, userId, amount, Date.now()]);
+  const balance = Number(res.rows[0].balance);
+
+  if (ledger) {
+    await client.query(`
+      INSERT INTO economy_transactions (guild_id, user_id, amount, balance_after, reason, created_at)
+      VALUES ($1, $2, $3::bigint, $4::bigint, $5, $6::bigint)
+    `, [guildId, userId, amount, balance, reason, Date.now()]);
+  }
+  return balance;
+}
+
 // Inicjalizacja struktur bazy danych
+// ============================================================
+//  RESET DANYCH - rejestr "celów" resetu
+//  Każdy cel ma dwie funkcje: preview (ile danych zostanie dotkniętych) i apply (wykonanie, w transakcji).
+//  userId = null oznacza CAŁY serwer. Gdy dojdzie nowa funkcja (np. ekwipunek ze sklepu),
+//  wystarczy dopisać tu kolejny wpis i etykietę w commands/reset.js, reszta zadziała sama.
+// ============================================================
+const RESET_TARGETS = {
+  inventory: {
+    async preview(guildId, userId) {
+      const res = await pool.query(`
+        SELECT COUNT(DISTINCT user_id)::int AS n, COALESCE(SUM(quantity), 0)::bigint AS total
+        FROM inventory
+        WHERE guild_id = $1 AND ($2::text IS NULL OR user_id = $2) AND quantity > 0
+      `, [guildId, userId]);
+      return { people: res.rows[0].n, total: Number(res.rows[0].total) };
+    },
+    async apply(client, guildId, userId) {
+      const rows = (await client.query(`
+        SELECT user_id, item_id, quantity FROM inventory
+        WHERE guild_id = $1 AND ($2::text IS NULL OR user_id = $2) FOR UPDATE
+      `, [guildId, userId])).rows;
+      for (const table of ['inventory', 'user_boosts', 'user_armed', 'item_daily_use']) {
+        await client.query(`DELETE FROM ${table} WHERE guild_id = $1 AND ($2::text IS NULL OR user_id = $2)`, [guildId, userId]);
+      }
+      return {
+        userIds: [...new Set(rows.map((r) => r.user_id))],
+        backup: rows.map((r) => ({ type: 'ekwipunek', userId: r.user_id, a: r.quantity, b: r.item_id })),
+      };
+    },
+  },
+
+
+  coins: {
+    async preview(guildId, userId) {
+      const res = await pool.query(`
+        SELECT COUNT(*)::int AS n, COALESCE(SUM(balance), 0)::bigint AS total
+        FROM economy_accounts
+        WHERE guild_id = $1 AND ($2::text IS NULL OR user_id = $2) AND (balance > 0 OR total_earned > 0)
+      `, [guildId, userId]);
+      return { people: res.rows[0].n, total: Number(res.rows[0].total) };
+    },
+    async apply(client, guildId, userId) {
+      const rows = (await client.query(`
+        SELECT user_id, balance, total_earned FROM economy_accounts
+        WHERE guild_id = $1 AND ($2::text IS NULL OR user_id = $2) AND (balance > 0 OR total_earned > 0)
+        FOR UPDATE
+      `, [guildId, userId])).rows;
+
+      // Zostawiamy ślad w dzienniku: kto stracił ile i dlaczego
+      for (const r of rows) {
+        const balance = Number(r.balance);
+        if (balance > 0) {
+          await client.query(`
+            INSERT INTO economy_transactions (guild_id, user_id, amount, balance_after, reason, created_at)
+            VALUES ($1, $2, $3::bigint, 0, 'reset', $4::bigint)
+          `, [guildId, r.user_id, -balance, Date.now()]);
+        }
+      }
+
+      await client.query(`
+        UPDATE economy_accounts SET balance = 0, total_earned = 0
+        WHERE guild_id = $1 AND ($2::text IS NULL OR user_id = $2) AND (balance > 0 OR total_earned > 0)
+      `, [guildId, userId]);
+
+      return {
+        userIds: rows.map((r) => r.user_id),
+        backup: rows.map((r) => ({ type: 'monety', userId: r.user_id, a: Number(r.balance), b: Number(r.total_earned) })),
+      };
+    },
+  },
+
+  xp: {
+    async preview(guildId, userId) {
+      const res = await pool.query(`
+        SELECT COUNT(*)::int AS n, COALESCE(SUM(xp), 0)::bigint AS total
+        FROM user_levels
+        WHERE guild_id = $1 AND ($2::text IS NULL OR user_id = $2) AND (xp > 0 OR level > 0)
+      `, [guildId, userId]);
+      return { people: res.rows[0].n, total: Number(res.rows[0].total) };
+    },
+    async apply(client, guildId, userId) {
+      const rows = (await client.query(`
+        SELECT user_id, xp, level FROM user_levels
+        WHERE guild_id = $1 AND ($2::text IS NULL OR user_id = $2) AND (xp > 0 OR level > 0)
+        FOR UPDATE
+      `, [guildId, userId])).rows;
+
+      // last_daily_at zostaje nietknięte, żeby reset EXP nie pozwalał odebrać dziennej nagrody drugi raz
+      await client.query(`
+        UPDATE user_levels SET xp = 0, level = 0
+        WHERE guild_id = $1 AND ($2::text IS NULL OR user_id = $2) AND (xp > 0 OR level > 0)
+      `, [guildId, userId]);
+
+      return {
+        userIds: rows.map((r) => r.user_id),
+        backup: rows.map((r) => ({ type: 'exp', userId: r.user_id, a: r.xp, b: r.level })),
+      };
+    },
+  },
+};
+
 async function initDb() {
   try {
     await query(`
@@ -216,6 +356,66 @@ async function initDb() {
         ADD COLUMN IF NOT EXISTS message_count INT NOT NULL DEFAULT 0;
     `);
 
+    // --- Ekonomia: konta i dziennik transakcji ---
+    await query(`
+      CREATE TABLE IF NOT EXISTS economy_accounts (
+        guild_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        balance BIGINT NOT NULL DEFAULT 0 CHECK (balance >= 0),
+        total_earned BIGINT NOT NULL DEFAULT 0,
+        created_at BIGINT NOT NULL,
+        PRIMARY KEY (guild_id, user_id)
+      );
+
+      CREATE TABLE IF NOT EXISTS economy_transactions (
+        id BIGSERIAL PRIMARY KEY,
+        guild_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        amount BIGINT NOT NULL,
+        balance_after BIGINT NOT NULL,
+        reason TEXT NOT NULL,
+        created_at BIGINT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_econ_tx_user ON economy_transactions(guild_id, user_id, created_at DESC);
+    `);
+
+    // --- Sklep i ekwipunek ---
+    await query(`
+      CREATE TABLE IF NOT EXISTS inventory (
+        guild_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        item_id TEXT NOT NULL,
+        quantity INT NOT NULL CHECK (quantity >= 0),
+        PRIMARY KEY (guild_id, user_id, item_id)
+      );
+
+      CREATE TABLE IF NOT EXISTS user_boosts (
+        guild_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        family TEXT NOT NULL,
+        value INT NOT NULL,
+        expires_at BIGINT NOT NULL,
+        PRIMARY KEY (guild_id, user_id, family)
+      );
+
+      CREATE TABLE IF NOT EXISTS user_armed (
+        guild_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        item_id TEXT NOT NULL,
+        armed_at BIGINT NOT NULL,
+        PRIMARY KEY (guild_id, user_id, kind)
+      );
+
+      CREATE TABLE IF NOT EXISTS item_daily_use (
+        guild_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        item_id TEXT NOT NULL,
+        use_date TEXT NOT NULL,
+        PRIMARY KEY (guild_id, user_id, item_id)
+      );
+    `);
+
     console.log('✅ Baza danych Supabase (PostgreSQL) została pomyślnie zainicjalizowana.');
   } catch (err) {
     console.error('❌ Błąd podczas inicjalizacji bazy PostgreSQL:', err);
@@ -226,6 +426,8 @@ initDb();
 
 module.exports = {
   raw: pool,
+  withTransaction,
+  applyCredit,
 
   // --- Konfiguracja serwera ---
   async getGuildConfig(guildId) {
@@ -472,6 +674,14 @@ module.exports = {
     return { oldLevel, newLevel, xp: row.xp };
   },
 
+  // Wszyscy użytkownicy z XP na serwerze (do eksportu / kopii zapasowej)
+  async getAllUserLevels(guildId) {
+    return await queryMany(
+      'SELECT user_id, xp, level FROM user_levels WHERE guild_id = $1 ORDER BY xp DESC',
+      [guildId],
+    );
+  },
+
   async getLeaderboardXp(guildId, limit = 10) {
     return await queryMany(`
       SELECT * FROM user_levels WHERE guild_id = $1 ORDER BY xp DESC LIMIT $2
@@ -503,6 +713,96 @@ module.exports = {
         UPDATE user_levels SET last_daily_at = $1 WHERE guild_id = $2 AND user_id = $3
       `, [now, guildId, userId]);
     }
+  },
+
+  // --- RESET DANYCH ---
+  RESET_TARGET_KEYS: Object.keys(RESET_TARGETS),
+
+  // Podgląd: ile osób i ile "wartości" zostanie dotkniętych (nic nie zmienia)
+  async previewReset(guildId, userId, keys) {
+    const out = {};
+    for (const key of keys) out[key] = await RESET_TARGETS[key].preview(guildId, userId);
+    return out;
+  },
+
+  // Wykonuje reset wybranych celów w JEDNEJ transakcji (albo wszystko, albo nic).
+  // Zwraca dla każdego celu: userIds (kogo dotknęło) i backup (co było przed resetem).
+  async resetData(guildId, userId, keys) {
+    return await withTransaction(async (client) => {
+      const out = {};
+      for (const key of keys) out[key] = await RESET_TARGETS[key].apply(client, guildId, userId);
+      return out;
+    });
+  },
+
+  // --- EKONOMIA ---
+  async getEconomyAccount(guildId, userId) {
+    return await queryOne('SELECT * FROM economy_accounts WHERE guild_id = $1 AND user_id = $2', [guildId, userId]);
+  },
+
+  // Dodaje monety i zapisuje wpis w dzienniku (dla zdarzeń "jednorazowych": nagrody, zakupy, wygrane itd.)
+  async addCoins(guildId, userId, amount, reason) {
+    if (!Number.isSafeInteger(amount) || amount <= 0) throw new Error('addCoins: kwota musi być dodatnią liczbą całkowitą');
+    return await withTransaction((client) => applyCredit(client, guildId, userId, amount, reason, true));
+  },
+
+  // Odejmuje monety TYLKO jeśli saldo wystarcza (jedno zapytanie, więc dwa szybkie kliknięcia nie wydadzą tych samych monet).
+  // Zwraca nowe saldo albo null, gdy brakuje środków.
+  async spendCoins(guildId, userId, amount, reason) {
+    if (!Number.isSafeInteger(amount) || amount <= 0) throw new Error('spendCoins: kwota musi być dodatnią liczbą całkowitą');
+    return await withTransaction(async (client) => {
+      const res = await client.query(`
+        UPDATE economy_accounts SET balance = balance - $3::bigint
+        WHERE guild_id = $1 AND user_id = $2 AND balance >= $3::bigint
+        RETURNING balance
+      `, [guildId, userId, amount]);
+      if (res.rowCount === 0) return null;
+
+      const balance = Number(res.rows[0].balance);
+      await client.query(`
+        INSERT INTO economy_transactions (guild_id, user_id, amount, balance_after, reason, created_at)
+        VALUES ($1, $2, $3::bigint, $4::bigint, $5, $6::bigint)
+      `, [guildId, userId, -amount, balance, reason, Date.now()]);
+      return balance;
+    });
+  },
+
+  async getRecentTransactions(guildId, userId, limit = 5) {
+    return await queryMany(`
+      SELECT amount, balance_after, reason, created_at
+      FROM economy_transactions
+      WHERE guild_id = $1 AND user_id = $2
+      ORDER BY created_at DESC, id DESC
+      LIMIT $3
+    `, [guildId, userId, limit]);
+  },
+
+  // Dzienna nagroda: sprawdzenie "czy już odebrano dziś (czas polski)" i wypłata w JEDNEJ transakcji.
+  // Drugie równoległe kliknięcie czeka na pierwsze i dostaje claimed: false.
+  async claimDailyCoins(guildId, userId, amount) {
+    return await withTransaction(async (client) => {
+      await client.query(`
+        INSERT INTO user_levels (guild_id, user_id, xp, level)
+        VALUES ($1, $2, 0, 0)
+        ON CONFLICT (guild_id, user_id) DO NOTHING
+      `, [guildId, userId]);
+
+      const claim = await client.query(`
+        UPDATE user_levels SET last_daily_at = $3::bigint
+        WHERE guild_id = $1 AND user_id = $2
+          AND (
+            last_daily_at IS NULL
+            OR (to_timestamp(last_daily_at / 1000.0) AT TIME ZONE 'Europe/Warsaw')::date
+               <> (now() AT TIME ZONE 'Europe/Warsaw')::date
+          )
+        RETURNING user_id
+      `, [guildId, userId, Date.now()]);
+
+      if (claim.rowCount === 0) return { claimed: false };
+
+      const balance = await applyCredit(client, guildId, userId, amount, 'daily', true);
+      return { claimed: true, balance };
+    });
   },
 
   // --- Powitania ---
@@ -708,7 +1008,7 @@ module.exports = {
   },
 
   async removeLevelRole(guildId, level) {
-    await query('DELETE FROM level_roles WHERE guild_id = $1 AND level = $2', [level, guildId]);
+    await query('DELETE FROM level_roles WHERE guild_id = $1 AND level = $2', [guildId, level]);
   },
 
   async getLevelRoles(guildId) {
